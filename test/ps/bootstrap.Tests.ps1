@@ -40,8 +40,8 @@ Describe 'winget package IDs' {
 
 Describe 'Invoke-Main' {
     BeforeEach {
-        $script:Hub = 'http://mini:8787'
-        $script:DryRun = $false
+        $Hub = 'http://mini:8787'
+        $DryRun = $false
         $script:installed = @{ 'winget.exe' = $true; 'node.exe' = $true; 'git.exe' = $true; 'gh.exe' = $true; 'npm.cmd' = $true; 'ask.cmd' = $true; 'tailscale.exe' = $true }
         $script:calls = [System.Collections.Generic.List[string]]::new()
         Mock Test-IsWindowsHost { $true }
@@ -56,7 +56,7 @@ Describe 'Invoke-Main' {
     }
 
     It 'dry run on a bare machine plans every install and the hand-over, changes nothing, ends with DRY RUN OK' {
-        $script:DryRun = $true
+        $DryRun = $true
         foreach ($k in 'node.exe', 'git.exe', 'gh.exe', 'tailscale.exe', 'ask.cmd') { $script:installed[$k] = $false }
         $lines = [System.Collections.Generic.List[string]]::new()
         Mock Write-Host { param($Object) $lines.Add([string]$Object) }
@@ -76,7 +76,7 @@ Describe 'Invoke-Main' {
         Mock Invoke-Winget { param($Arguments) $script:calls.Add('winget ' + ($Arguments -join ' ')); $script:installed['gh.exe'] = $true; 0 }
         $code = Invoke-Main
         $code | Should -Be 0
-        ($script:calls | Where-Object { $_ -like 'winget*' }).Count | Should -Be 1
+        @($script:calls | Where-Object { $_ -like 'winget*' }).Count | Should -Be 1
         $script:calls[0] | Should -Match '--id GitHub.cli'
         $script:calls | Should -Contain 'ask setup --hub http://mini:8787'
         Should -Invoke Update-SessionPath -Times 2
@@ -85,7 +85,7 @@ Describe 'Invoke-Main' {
     It 'is idempotent: a finished machine installs nothing and only updates ask' {
         $code = Invoke-Main
         $code | Should -Be 0
-        ($script:calls | Where-Object { $_ -like 'winget*' }).Count | Should -Be 0
+        @($script:calls | Where-Object { $_ -like 'winget*' }).Count | Should -Be 0
         $script:calls[0] | Should -BeExactly 'npm install -g git+https://github.com/drunkencoders-hq/ask.git'
     }
 
@@ -111,7 +111,7 @@ Describe 'Invoke-Main' {
         $lines = [System.Collections.Generic.List[string]]::new()
         Mock Write-Host { param($Object) $lines.Add([string]$Object) }
         (Invoke-Main) | Should -Be 1
-        ($lines | Where-Object { $_ -like 'bootstrap: FAILED:*' }).Count | Should -Be 1
+        @($lines | Where-Object { $_ -like 'bootstrap: FAILED:*' }).Count | Should -Be 1
         ($lines -join "`n") | Should -Match 'winget could not install Node.js LTS \(OpenJS.NodeJS.LTS, exit 5\)'
     }
 

@@ -191,13 +191,14 @@ npm run demo      # CLI end to end against the stub; stub answers after 2 s
 npm run demo:mcp  # MCP handshake, tools/list, ask, against the stub
 ```
 
-PowerShell checks (no Windows needed, Docker):
+PowerShell checks for `bootstrap.ps1` run in a throwaway Docker container
+(PowerShell 7 on Linux, so not Windows PowerShell 5.1 or real Windows):
+parser, PSScriptAnalyzer (with the 5.1 compatibility rules), the Pester
+tests in `test/ps/`, and `-DryRun` with the tools mocked.
 
 ```
-docker run --rm -v "$PWD:/src:ro" mcr.microsoft.com/powershell:7.4-ubuntu-22.04 pwsh -NoProfile -Command \
-  "Install-Module Pester,PSScriptAnalyzer -Force -Scope CurrentUser; \
-   Invoke-ScriptAnalyzer /src/bootstrap.ps1 -Severity Error,Warning; \
-   Invoke-Pester /src/test/ps -Output Detailed"
+docker run --rm -v "$PWD:/src:ro" mcr.microsoft.com/powershell:7.4-ubuntu-22.04 pwsh -NoProfile -File /src/test/ps/run-checks.ps1
+docker rmi mcr.microsoft.com/powershell:7.4-ubuntu-22.04
 ```
 
 `bash bootstrap.sh --dry-run --hub http://mini:8787` and `shellcheck bootstrap.sh`
