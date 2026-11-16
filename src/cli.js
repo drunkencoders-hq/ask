@@ -160,7 +160,8 @@ async function waitPrintReceipt(client, store, entry, o) {
   // answered (or already delivered): print as data, then confirm delivery.
   if (o.json) {
     process.stdout.write(
-      JSON.stringify({ id: q.id, status: 'answered', project: q.project, answer: q.answer, card: q.card }) + '\n',
+      // route, answerer and comments are passed through verbatim when the hub sends them (contract change 2).
+      JSON.stringify({ id: q.id, status: 'answered', project: q.project, answer: q.answer, card: q.card, route: q.route, answerer: q.answerer, comments: q.comments }) + '\n',
     );
   } else {
     process.stdout.write(formatAnswer(q) + '\n');
@@ -241,7 +242,10 @@ export async function main(argv) {
         process.stdout.write(JSON.stringify({ questions: qs, local_only: local }, null, 2) + '\n');
       } else {
         for (const q of qs) {
-          process.stdout.write(`${q.id}\t${q.status}\t${q.project}\t${q.created_at}\t${q.question_preview ?? ''}\n`);
+          // source and route columns only when the hub provides them (contract change 2).
+          const extra = q.source !== undefined || q.route !== undefined ? `\t${q.source ?? '-'}\t${q.route ?? '-'}` : '';
+          const project = 'route' in q ? (q.project ?? '-') : q.project;
+          process.stdout.write(`${q.id}\t${q.status}\t${project}${extra}\t${q.created_at}\t${q.question_preview ?? ''}\n`);
         }
         for (const e of local) {
           process.stdout.write(`${e.id ?? '(not sent)'}\tlocal\t${e.project ?? e.repo ?? ''}\t${e.created_at}\t${e.question.slice(0, 80)}\n`);
@@ -266,7 +270,7 @@ export async function main(argv) {
       }
       const id = /** @type {string} */ (entry?.id ?? target.id);
       currentId = id;
-      err(`Resuming ${id}…`);
+      err(`Resuming ${id} (${target.reason})…`);
       return await waitPrintReceipt(
         client,
         store,
@@ -315,7 +319,12 @@ export async function main(argv) {
 
     const entry = await submitQuestion(client, store, { question, repo, project, branch, context }, ac.signal);
     currentId = entry.id;
-    err(`Asked ${entry.id} (${project ? `project ${project}` : repo}${branch ? `, branch ${branch}` : ''}). Waiting for the owner's answer…`);
+    // One immediate read tells us who will answer (contract change 2); an older hub does not say.
+    let answerer = null;
+    try {
+      answerer = (await client.get(/** @type {string} */ (entry.id), 0, ac.signal)).answerer ?? null;
+    } catch {}
+    err(`Asked ${entry.id} (${project ? `project ${project}` : repo}${branch ? `, branch ${branch}` : ''}). ${answerer ? `Waiting for ${answerer}'s answer…` : "Waiting for the owner's answer…"}`);
     err(`If you stop waiting, fetch the answer later with: ask --resume ${entry.id}`);
     return await waitPrintReceipt(client, store, /** @type {any} */ (entry), { timeoutSec, json, signal: ac.signal });
   } catch (e) {

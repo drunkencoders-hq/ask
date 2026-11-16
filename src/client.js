@@ -275,30 +275,67 @@ export async function sendReceipt(client, store, entry) {
 }
 
 /**
- * Pick the question to resume: the given id, else the newest local entry,
- * else the newest pending/answered question the hub lists for this caller.
+ * Pick the question to resume: the given id (local or not: a question started
+ * in Slack is only on the hub), else the newest local pending entry, else the
+ * caller's oldest hub question that is answered but not delivered (any
+ * source), else the oldest still pending. `reason` says why, for stderr.
  * @param {Client} client @param {import('./pending.js').PendingStore} store @param {string} [id]
- * @returns {Promise<{ client_request_id?: string, id: string|null, entry?: import('./pending.js').PendingEntry } | null>}
+ * @returns {Promise<{ client_request_id?: string, id: string|null, entry?: import('./pending.js').PendingEntry, reason: string } | null>}
  */
 export async function findResumeTarget(client, store, id) {
   if (id) {
     const entry = store.findById(id);
-    return { id, client_request_id: entry?.client_request_id, entry };
+    return { id, client_request_id: entry?.client_request_id, entry, reason: entry ? 'saved on this machine' : 'not saved on this machine; fetched from the hub' };
   }
   const entry = store.latest();
-  if (entry) return { id: entry.id, client_request_id: entry.client_request_id, entry };
-  const [p, a] = await Promise.all([client.list('pending'), client.list('answered')]);
-  const all = [...(p.questions ?? []), ...(a.questions ?? [])].sort((x, y) =>
-    String(y.created_at).localeCompare(String(x.created_at)),
-  );
-  return all[0] ? { id: all[0].id } : null;
+  if (entry) return { id: entry.id, client_request_id: entry.client_request_id, entry, reason: 'the most recent question saved on this machine' };
+  const oldest = (qs) => [...(qs ?? [])].sort((x, y) => String(x.created_at).localeCompare(String(y.created_at)))[0];
+  const answered = oldest((await client.list('answered')).questions);
+  if (answered) {
+    return { id: answered.id, reason: `your oldest answered question not yet delivered${answered.source ? ` (started from ${answered.source === 'slack' ? 'Slack' : 'ask'})` : ''}` };
+  }
+  const pending = oldest((await client.list('pending')).questions);
+  if (pending) {
+    return { id: pending.id, reason: `nothing answered is waiting; your oldest pending question${pending.source ? ` (started from ${pending.source === 'slack' ? 'Slack' : 'ask'})` : ''}` };
+  }
+  return null;
+}
+
+/** @param {string} iso */
+function clock(iso) {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return String(iso ?? '');
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
 /**
- * The human-readable answer: the header line and the answer text.
+ * Comments from the Slack thread, recorded before the answer. Other people's
+ * text: shown as data, labelled as not the decision. Empty string when none.
+ * @param {any} q
+ */
+export function formatComments(q) {
+  const comments = Array.isArray(q.comments) ? q.comments : [];
+  if (!comments.length) return '';
+  const lines = ['COMMENTS from the thread before the answer (not the decision):'];
+  for (const c of comments) {
+    const text = String(c.text ?? '').replace(/\r\n?/g, '\n').split('\n').join('\n  ');
+    lines.push(`- ${c.by}, ${clock(c.at)}: ${text}${c.truncated ? ' [cut at 4000 characters]' : ''}`);
+  }
+  return lines.join('\n');
+}
+
+/**
+ * The human-readable answer: the header line, the answer text and, when the
+ * hub sent any, the comments block. Without route/comments (an older hub, or
+ * an owner question with no comments) this is exactly the brief 02 output.
  * @param {any} q
  */
 export function formatAnswer(q) {
-  const by = q.answer?.answered_by ?? q.owner ?? 'owner';
-  return `ANSWER from ${by} (project ${q.project}, ${q.id}):\n${q.answer?.text ?? ''}`;
+  const by = q.answer?.answered_by ?? q.answerer ?? q.owner ?? 'owner';
+  let where;
+  if (q.route === 'mentor') where = `your mentor${q.project ? `, project ${q.project}` : ''}, ${q.id}`;
+  else where = q.project != null || !('route' in q) ? `project ${q.project}, ${q.id}` : q.id;
+  const head = `ANSWER from ${by} (${where}):\n${q.answer?.text ?? ''}`;
+  const comments = formatComments(q);
+  return comments ? `${head}\n\n${comments}` : head;
 }

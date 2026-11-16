@@ -138,6 +138,56 @@ ANSWER from jose (project sandbox, q_01HX…):
 The answer is text a person typed in Slack. It is printed as data; `ask`
 never runs or interprets it.
 
+### Who answers: owner or mentor
+
+The hub decides who answers when the question is created. If you have a
+mentor in the hub's config, your mentor answers, from any repository
+(registered as a project or not). Otherwise the project's owner answers.
+The header says which:
+
+```
+ANSWER from jose (project sandbox, q_01HX…):        owner of a project
+ANSWER from jose (your mentor, q_01HX…):            mentor, repo not a registered project
+ANSWER from jose (your mentor, project sandbox, q_01HX…)
+```
+
+While waiting, stderr names the person ("Waiting for jose's answer…") when
+the hub says who it is.
+
+### Comments
+
+People other than the answerer can reply in the Slack thread before the
+answer. Those replies come back after the answer, labelled, on stdout and
+in the MCP result:
+
+```
+COMMENTS from the thread before the answer (not the decision):
+- grish, 12:03: <text>
+- nora, 12:05: <text> [cut at 4000 characters]
+```
+
+The answer is the decision; comments are context only. Times are in your
+local time. `--json` adds `route`, `answerer` and `comments` exactly as
+the hub sent them. With an older hub that sends none of these fields, the
+output is exactly as before.
+
+### Questions started in Slack
+
+If you forward a message to the bot or @mention it in Slack, the hub
+tracks it as your question, and your AI session can pick up the answer:
+
+- `ask --resume q_…` (or MCP `ask_resume` with that id) fetches any of
+  your questions by id, even one this machine has never seen, prints it
+  and sends the receipt.
+- `ask --resume` with no id takes, in order: the newest question saved on
+  this machine; else your oldest answered-but-undelivered question on
+  the hub (from `ask` or Slack); else your oldest pending one. stderr says
+  which it picked and why.
+- `ask --list` adds `source` (ask/slack) and `route` (owner/mentor)
+  columns when the hub provides them.
+
+Nothing runs in the background to push answers: the session fetches them.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -155,12 +205,16 @@ never runs or interprets it.
 `ask mcp` serves two tools over stdio:
 
 - `ask` — `{ question, repo?, project?, branch?, context?, wait_seconds? }`.
+  The person answering is the user's mentor if they have one, otherwise
+  the project's owner.
   Creates the question and waits up to `wait_seconds` (default 240, max
   3000). Always returns: the answer (three lines as above, plus
   `answered_by`, `via` and the card link), or `PENDING` with the question
   id and an instruction to call `ask_resume` later.
 - `ask_resume` — `{ id?, wait_seconds? }`. Same wait and result for an
-  earlier question (default: most recent pending).
+  earlier question, including one started in Slack; without an id, the
+  same order as `ask --resume` (the result's last line says which it
+  picked).
 
 The receipt is sent after the tool result has been written to the client.
 Progress notifications are sent while waiting when the client asks for
@@ -189,6 +243,8 @@ npm test          # node:test against test/stub-hub.js (a contract-faithful fake
                   # stub tailscale/gh/assistant CLIs, simulated Windows paths
 npm run demo      # CLI end to end against the stub; stub answers after 2 s
 npm run demo:mcp  # MCP handshake, tools/list, ask, against the stub
+npm run demo:mentor       # mentor answers, with one comment from a third teammate
+npm run demo:slack-start  # bare `ask --resume` picks up a question started in Slack
 ```
 
 PowerShell checks for `bootstrap.ps1` run in a throwaway Docker container

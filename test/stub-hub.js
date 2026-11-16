@@ -13,6 +13,8 @@ const TERMINAL_WAKE = new Set(['answered', 'delivered', 'failed']);
  *   chatConnected?: boolean,
  *   autoAnswerMs?: number|null,        // answer every new question after this many ms
  *   autoAnswerText?: string,
+ *   mentors?: Record<string, string>,  // mentee → mentor (contract change 2); default none
+ *   legacy?: boolean,                  // answer in the pre-change-2 shape (no route/answerer/comments/source on lists)
  * }} StubOptions
  */
 
@@ -24,6 +26,8 @@ export async function startStubHub(opts = {}) {
     chatConnected: opts.chatConnected ?? true,
     autoAnswerMs: opts.autoAnswerMs ?? null,
     autoAnswerText: opts.autoAnswerText ?? 'JSON, please.',
+    mentors: opts.mentors ?? {},
+    legacy: opts.legacy ?? false,
     /** @type {Map<string, any>} */
     questions: new Map(),
     /** @type {Map<string, string>} key asked_by|client_request_id → id */
@@ -64,7 +68,7 @@ export async function startStubHub(opts = {}) {
     status: q.status,
     project: q.project,
     asked_by: q.asked_by,
-    source: 'ask',
+    source: q.source,
     created_at: q.created_at,
     owner: q.owner,
     card: q.card,
@@ -72,6 +76,8 @@ export async function startStubHub(opts = {}) {
     answer: q.answer,
     delivered_at: q.delivered_at,
     error: q.error,
+    // contract change 2 (brief 01b §7): always present unless the stub plays an older hub.
+    ...(state.legacy ? {} : { route: q.route, answerer: q.answerer, comments: q.comments }),
   });
 
   /** @param {any} q @param {Partial<any>} patch */
@@ -81,7 +87,7 @@ export async function startStubHub(opts = {}) {
   };
 
   /** @param {any} q @param {string} text @param {string} [by] @param {string} [via] */
-  const answer = (q, text, by = q.owner, via = 'thread') =>
+  const answer = (q, text, by = q.answerer ?? q.owner, via = 'thread') =>
     setQ(q, { status: 'answered', answer: { text, option_id: null, answered_by: by, answered_at: new Date().toISOString(), via } });
 
   const newId = () => {
@@ -149,12 +155,19 @@ export async function startStubHub(opts = {}) {
         if (body.context !== undefined && (typeof body.context !== 'string' || body.context.length > 8000)) {
           return error(res, 400, 'invalid_request', 'context must be at most 8000 characters');
         }
-        if (body.project) projectSlug = state.projects[body.project] ? body.project : null;
-        else if (body.repo) projectSlug = Object.keys(state.projects).find((s) => state.projects[s].repo === body.repo) ?? null;
-        else return error(res, 400, 'invalid_request', 'repo or project is required');
-        if (!projectSlug) return error(res, 404, 'unknown_project', `No project is configured for ${body.project ?? body.repo}.`);
-        if (!state.projects[projectSlug].owner) {
-          return error(res, 409, 'no_owner_configured', `Project ${projectSlug} has no owner configured; nobody can answer.`);
+        const mentor = state.legacy ? null : (state.mentors[me] ?? null);
+        if (body.project) {
+          projectSlug = state.projects[body.project] ? body.project : null;
+          // An explicit unknown project slug is refused on both routes.
+          if (!projectSlug) return error(res, 404, 'unknown_project', `No project is configured for ${body.project}.`);
+        } else if (body.repo) projectSlug = Object.keys(state.projects).find((s) => state.projects[s].repo === body.repo) ?? null;
+        else if (!mentor) return error(res, 400, 'invalid_request', 'repo or project is required');
+        if (!mentor) {
+          // Owner route: exactly the brief 01 behaviour.
+          if (!projectSlug) return error(res, 404, 'unknown_project', `No project is configured for ${body.project ?? body.repo}.`);
+          if (!state.projects[projectSlug].owner) {
+            return error(res, 409, 'no_owner_configured', `Project ${projectSlug} has no owner configured; nobody can answer.`);
+          }
         }
         if (!state.chatConnected) return error(res, 503, 'chat_unavailable', 'The hub is not connected to Slack right now.');
       } else if (kind !== 'standby_test') {
@@ -176,7 +189,12 @@ export async function startStubHub(opts = {}) {
         error: null,
         question: body.question ?? '',
         body,
+        source: 'ask',
+        route: kind === 'question' && !state.legacy && state.mentors[me] ? 'mentor' : 'owner',
+        answerer: null,
+        comments: [],
       };
+      q.answerer = kind === 'standby_test' ? null : q.route === 'mentor' ? state.mentors[me] : q.owner;
       state.questions.set(id, q);
       state.idem.set(k, id);
       if (kind === 'standby_test') {
@@ -184,7 +202,10 @@ export async function startStubHub(opts = {}) {
       } else {
         // Simulate interpreting → posted.
         setTimeout(() => {
-          if (q.status === 'received') setQ(q, { status: 'posted', card: { channel: 'C0OFFICE', permalink: `https://example.invalid/archives/C0OFFICE/p${state.seq}` } });
+          if (q.status === 'received') {
+            const ch = q.route === 'mentor' ? 'C0NORAMENTOR' : 'C0OFFICE';
+            setQ(q, { status: 'posted', card: { channel: ch, permalink: `https://example.invalid/archives/${ch}/p${state.seq}` } });
+          }
         }, 20);
         if (state.autoAnswerMs != null) {
           setTimeout(() => {
@@ -209,7 +230,7 @@ export async function startStubHub(opts = {}) {
         .filter((q) => (st === 'pending' ? pending.has(q.status) : st === 'answered' ? q.status === 'answered' : true))
         .sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id.localeCompare(a.id))
         .slice(0, 50)
-        .map((q) => ({ id: q.id, status: q.status, project: q.project, created_at: q.created_at, question_preview: q.question.slice(0, 80) }));
+        .map((q) => ({ id: q.id, status: q.status, project: q.project, created_at: q.created_at, question_preview: q.question.slice(0, 80), ...(state.legacy ? {} : { route: q.route, source: q.source }) }));
       return send(res, 200, { questions: qs });
     }
 
@@ -279,6 +300,41 @@ export async function startStubHub(opts = {}) {
       const q = state.questions.get(id);
       if (!q) throw new Error(`stub: no question ${id}`);
       answer(q, text, by, via);
+    },
+    /**
+     * A thread reply by someone other than the answerer, before the answer:
+     * stored as a comment (max 20; cut at 4000 characters with truncated: true).
+     */
+    addComment(id, by, text, at = new Date().toISOString()) {
+      const q = state.questions.get(id);
+      if (!q) throw new Error(`stub: no question ${id}`);
+      if (q.comments.length >= 20) return false;
+      const t = String(text);
+      q.comments.push({ by, text: t.slice(0, 4000), at, truncated: t.length > 4000 });
+      return true;
+    },
+    /**
+     * A question started in Slack (forwarded or @mention) by `asked_by`.
+     * @param {{ question: string, asked_by?: string, project?: string|null, created_at?: string, answer?: string, by?: string }} o
+     */
+    createSlackQuestion(o) {
+      const asker = o.asked_by ?? state.teammate;
+      const mentor = state.mentors[asker];
+      const project = o.project ?? null;
+      const id = newId();
+      const q = {
+        id, kind: 'question', status: 'posted', project, asked_by: asker,
+        created_at: o.created_at ?? new Date().toISOString(),
+        owner: project ? (state.projects[project]?.owner ?? null) : null,
+        card: { channel: 'C0NORAMENTOR', permalink: `https://example.invalid/archives/C0NORAMENTOR/p${state.seq}` },
+        interpretation: null, answer: null, delivered_at: null, error: null,
+        question: o.question, body: {}, source: 'slack',
+        route: mentor ? 'mentor' : 'owner', answerer: null, comments: [],
+      };
+      q.answerer = mentor ?? q.owner;
+      state.questions.set(id, q);
+      if (o.answer !== undefined) answer(q, o.answer, o.by);
+      return id;
     },
     /** Mark a question failed. */
     fail(id, message = 'card could not be posted') {

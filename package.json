@@ -17,9 +17,11 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/paths.test.js test/cli.test.js test/mcp.test.js test/assistants.test.js test/setup.test.js test/bootstrap-sh.test.js",
+    "test": "node --test --test-concurrency=1 test/paths.test.js test/cli.test.js test/mcp.test.js test/mentor.test.js test/assistants.test.js test/setup.test.js test/bootstrap-sh.test.js",
     "demo": "node scripts/demo.js",
-    "demo:mcp": "node scripts/demo-mcp.js"
+    "demo:mcp": "node scripts/demo-mcp.js",
+    "demo:mentor": "node scripts/demo-mentor.js",
+    "demo:slack-start": "node scripts/demo-slack-start.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.2",
