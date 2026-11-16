@@ -29,7 +29,11 @@ const TERMINAL_WAKE = new Set(['answered', 'delivered', 'failed']);
  *   decideAfterMs?: number,
  *   registered?: boolean,              // start already registered (a second run)
  *   failProgress?: number,             // next N progress calls → 503 (or 'drop' them)
- *   rateLimit?: number,                // calls per token before 429 (default: none)
+ *   rateLimit?: number,                // hello+progress+identity calls per token before 429 (default: none)
+ *   throttle?: Record<string, number>, // route → next N calls answer 429 with Retry-After
+ *   retryAfterSec?: number,            // Retry-After on a 429 (default 1)
+ *   approver?: string|null,            // display name in hello/status (default 'Jose'; null: field absent)
+ *   tokenDead?: boolean,               // the token is already dead (e.g. 60 minutes after the tap)
  * }} OnboardingOptions
  */
 
@@ -132,7 +136,10 @@ export async function startStubHub(opts = {}) {
   state.onboarding = ob
     ? {
         state: ob.registered ? 'registered' : 'invited',
-        tokenDead: false,
+        tokenDead: !!ob.tokenDead,
+        tappedAt: ob.registered ? Date.now() : null,
+        throttle: { ...(ob.throttle ?? {}) },
+        throttled: /** @type {string[]} */ ([]),
         registeredAt: ob.registered ? Date.now() : null,
         identity: /** @type {any} */ (null),
         boundLogin: /** @type {string|null} */ (null),
@@ -169,9 +176,10 @@ export async function startStubHub(opts = {}) {
     if (d === 'register') {
       registerTeammate();
       o.registeredAt = Date.now();
+      o.tappedAt = Date.now();
       setOb('registered');
     } else if (d === 'refuse') {
-      o.tokenDead = true;
+      o.tappedAt = Date.now();
       setOb('refused');
     } else if (d === 'expire') {
       o.tokenDead = true;
@@ -179,15 +187,21 @@ export async function startStubHub(opts = {}) {
     }
   };
 
-  /** Token check per §C. @returns {string|null} error code, or null when valid for this route */
+  /**
+   * Token check per §C (final wording). After "Register": status and progress
+   * for 60 minutes. After "Refuse": status only (returns refused), 60 minutes.
+   * hello and identity: 401 from the moment of the tap. Then everything 401.
+   * @returns {string|null} error code, or null when valid for this route
+   */
   const tokenError = (token, route) => {
     const o = state.onboarding;
     if (!o || typeof token !== 'string' || token !== ob.token || o.tokenDead) return 'invalid_token';
-    if (o.state === 'registered') {
-      // After approval the token works for progress only, for 60 minutes.
-      if (route !== 'progress' || Date.now() - o.registeredAt > 60 * 60_000) return 'invalid_token';
+    const tapped = o.state === 'registered' || o.state === 'refused';
+    if (tapped) {
+      if (route === 'hello' || route === 'identity') return 'invalid_token';
+      if (Date.now() - (o.tappedAt ?? 0) > 60 * 60_000) return 'invalid_token';
+      if (o.state === 'refused' && route !== 'status') return 'invalid_token';
     }
-    if (o.state === 'refused') return 'invalid_token';
     const login = ob.tailscaleLogin === undefined ? 'nora@example.com' : ob.tailscaleLogin;
     if (login === null) return 'caller_unidentified';
     if (o.boundLogin && o.boundLogin !== login) return 'invalid_token';
@@ -206,14 +220,27 @@ export async function startStubHub(opts = {}) {
     const o = state.onboarding;
     const te = tokenError(body.token, route);
     if (te) return error(res, tokenStatus[te], te, te === 'invalid_token' ? 'This set-up token is not valid.' : 'The hub could not identify your Tailscale login.');
-    o.calls += 1;
-    if (ob.rateLimit && o.calls > ob.rateLimit) return error(res, 429, 'rate_limited', 'Too many calls for this token.');
+    const tooMany = (why) => {
+      o.throttled.push(route);
+      const b = JSON.stringify({ error: { code: 'rate_limited', message: why } });
+      res.writeHead(429, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(b), 'retry-after': String(ob.retryAfterSec ?? 1) });
+      res.end(b);
+    };
+    if ((o.throttle[route] ?? 0) > 0) {
+      o.throttle[route] -= 1;
+      return tooMany('Slow down (test throttle).');
+    }
+    if (route !== 'status') {
+      o.calls += 1; // status long polls are not counted (§D)
+      if (ob.rateLimit && o.calls > ob.rateLimit) return tooMany('Too many calls for this token.');
+    }
+    const approver = ob.approver === undefined ? 'Jose' : ob.approver;
     const login = ob.tailscaleLogin === undefined ? 'nora@example.com' : ob.tailscaleLogin;
 
     if (route === 'hello') {
       o.helloCalls += 1;
       if (o.state === 'invited') o.state = 'identified';
-      return send(res, 200, { state: o.state, display_name: ob.displayName ?? 'Nora', teammate: o.state === 'registered' ? state.teammate : null, tailscale_login: login });
+      return send(res, 200, { state: o.state, display_name: ob.displayName ?? 'Nora', teammate: o.state === 'registered' ? state.teammate : null, tailscale_login: login, ...(approver === null ? {} : { approver }) });
     }
     if (route === 'progress') {
       if (typeof body.step !== 'string' || !/^[a-z0-9-]{1,40}$/.test(body.step)) return error(res, 400, 'invalid_request', 'bad step');
@@ -256,8 +283,8 @@ export async function startStubHub(opts = {}) {
     if (!Number.isFinite(wait) || wait < 0 || wait > 55) return error(res, 400, 'invalid_request', 'wait must be 0–55');
     const start = o.state;
     const reply = () => {
-      if (o.tokenDead && o.state !== 'refused') return error(res, 401, 'invalid_token', 'This set-up token is not valid.');
-      return send(res, 200, { state: o.state, teammate: o.state === 'registered' ? state.teammate : null });
+      if (o.tokenDead) return error(res, 401, 'invalid_token', 'This set-up token is not valid.');
+      return send(res, 200, { state: o.state, teammate: o.state === 'registered' ? state.teammate : null, ...(approver === null ? {} : { approver }) });
     };
     if (wait === 0 || start === 'registered' || start === 'refused') return reply();
     let done = false;

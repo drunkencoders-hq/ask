@@ -35,9 +35,12 @@ Tailscale's VPN configuration) and **two sign-ins in your browser**
 1. Refuses to run as root or on anything but macOS.
 2. Installs **only what is missing**, in this order:
    1. Homebrew, with its official installer in non-interactive mode. That
-      mode cannot ask for your password itself, so just before it the
-      script runs `sudo -v`: macOS asks for your Mac password once (your
-      account must be an administrator). Nothing else runs with sudo.
+      mode cannot ask for your password itself, so only when Homebrew is
+      missing the script runs `sudo -v` once, just before the installer:
+      macOS asks for your Mac password in Terminal. The script never sees
+      or stores the password and runs nothing else with sudo (decision 96).
+      If your account is not an administrator it stops before that, with
+      one line saying so.
    2. `git` (Homebrew). Apple's `/usr/bin/git` counts only when the Command
       Line Tools are installed, so their install dialog never pops up.
    3. Node (Homebrew; if missing or older than 20).
@@ -49,18 +52,25 @@ Tailscale's VPN configuration) and **two sign-ins in your browser**
    7. Claude Code (`claude-code` cask), only if none of Claude Code, Cursor
       or Codex CLI is installed.
 3. Runs `ask setup --hub <hub_url>` with the token, which:
-   - signs you in to GitHub: `gh auth login --web` without a terminal, so
-     gh asks nothing; the one-time code is copied to your clipboard and
-     github.com/login/device opens in your browser. Reads your GitHub login
-     with `gh api user`;
+   - signs you in to GitHub: `gh auth login --web --clipboard` without a
+     terminal, so gh asks nothing. gh puts the one-time code (and nothing
+     else) on your **clipboard** and setup also prints it, in case copying
+     fails; the code is not written to any file or report.
+     github.com/login/device opens in your browser; paste the code there.
+     Then `gh auth setup-git`, and your GitHub login is read with
+     `gh api user`;
    - starts the Tailscale app and signs you in (`tailscale login`, the
      sign-in page opens in your browser);
    - waits for the hub. If it is not reachable and your message had a share
      link, it opens that link once so you can accept the Mac mini's share.
      It gives up after 15 minutes (exit 4; paste the command again);
-   - reports who you are (below) and waits until your registration is
-     confirmed in Slack (refused, or the command expired: exit 5, ask for a
-     new command with `/onboard`);
+   - asks the hub `whoami` first: if it already knows you (the command
+     pasted again after registration), registration is skipped;
+   - otherwise reports who you are (below) and waits until the approver
+     confirms your registration in Slack ("Waiting for <approver> to
+     confirm in Slack…"; refused, or the command expired: exit 5, ask for
+     a new command with `/onboard`). If the hub asks it to slow down (429),
+     it waits as long as the hub says and carries on;
    - writes `~/.config/drunkencoders/ask.json` containing only `hub_url`;
    - registers the `ask` MCP server with Claude Code, Cursor, Codex CLI and
      Gemini CLI if they are installed (each tool's own `mcp add` command;
@@ -75,6 +85,7 @@ Tailscale's VPN configuration) and **two sign-ins in your browser**
 
 **What is sent to the hub**, and nothing else about your machine:
 
+- `whoami` (no body): does the hub already know this Mac?
 - `hello`: the ask version, your Mac's host name and OS;
 - `identity`: your GitHub login, OS, host name, and which AI assistants are
   installed (for example `claude-code`). Your Slack identity comes from the

@@ -49,8 +49,20 @@ function knob(env, name, dflt) {
 /** @param {Date} d */
 const hhmmss = (d) => d.toTimeString().slice(0, 8);
 
+/** A 429's wait: Retry-After in seconds (default 5 s, at most 10 minutes). @param {unknown} e */
+export function retryAfterMs(e) {
+  const ms = /** @type {any} */ (e)?.retryAfterMs;
+  return typeof ms === 'number' && Number.isFinite(ms) ? ms : 5000;
+}
+
+/** @param {unknown} e */
+const isRateLimited = (e) => e instanceof HubError && e.code === 'rate_limited';
+/** @param {unknown} e */
+const isDeadToken = (e) => e instanceof HubError && e.code === 'invalid_token';
+
 /**
  * HTTP for the four onboarding routes. The token travels in the JSON body only.
+ * A 429 becomes a HubError('rate_limited') carrying `retryAfterMs`.
  * @param {string} hubUrl @param {string} token
  */
 export function onboardingClient(hubUrl, token) {
@@ -73,6 +85,12 @@ export function onboardingClient(hubUrl, token) {
       } catch {}
       if (res.ok && data) return data;
       const err = data?.error;
+      if (res.status === 429) {
+        const e = new HubError(429, 'rate_limited', String(err?.message ?? 'rate limited'));
+        const ra = Number(res.headers.get('retry-after'));
+        /** @type {any} */ (e).retryAfterMs = Number.isFinite(ra) && ra >= 0 ? Math.min(ra, 600) * 1000 : 5000;
+        throw e;
+      }
       if (err && typeof err.code === 'string' && (res.status < 500 || err.code === 'chat_unavailable')) {
         throw new HubError(res.status, err.code, String(err.message ?? err.code));
       }
@@ -90,8 +108,9 @@ export function onboardingClient(hubUrl, token) {
 /**
  * Progress reports (decision 80). Before the hub is reachable they are queued
  * in memory, each with its real time; `goLive` sends them in order (the last
- * status per step, to stay well inside the hub's per-token rate limit). A
- * failed report is printed and never fails the set-up.
+ * status per step). A failed report is printed and never fails the set-up; a
+ * 429 waits for Retry-After; once the hub says the token is no longer valid
+ * (60 minutes after the tap), reports are dropped with one printed line.
  */
 export class Reporter {
   /** @param {import('./sys.js').Sys} sys */
@@ -103,6 +122,7 @@ export class Reporter {
     this.post = null;
     this.sent = 0;
     this.failed = 0;
+    this.dead = false;
   }
 
   /** Steps the bootstrap script already did: lines "epoch<TAB>step<TAB>status<TAB>note". @param {string|undefined} file */
@@ -132,33 +152,41 @@ export class Reporter {
     return this.send(item);
   }
 
+  markDead() {
+    if (this.dead) return;
+    this.dead = true;
+    this.sys.err('(the set-up command no longer accepts progress reports; the rest are not sent. Nothing else is affected.)');
+  }
+
   /** @param {{ step: string, status: string, note?: string, at: Date }} item @param {boolean} [queued] */
   async send(item, queued = false) {
-    if (!this.post) return false;
+    if (!this.post || this.dead) return false;
     const note = (queued ? `at ${hhmmss(item.at)}${item.note ? `; ${item.note}` : ''}` : (item.note ?? '')).slice(0, 300);
     const body = { step: item.step, status: item.status, client_request_id: randomUUID(), ...(note ? { note } : {}) };
-    for (let attempt = 0; attempt < 2; attempt++) {
+    let lastErr = '';
+    for (let attempt = 0; attempt < 4; attempt++) {
       try {
         await this.post('progress', body, 10_000);
         this.sent += 1;
         return true;
       } catch (e) {
-        if (e instanceof HubError && e.code !== 'rate_limited' && e.code !== 'chat_unavailable') {
-          this.failed += 1;
-          this.sys.err(`(progress report "${item.step}: ${item.status}" not sent: ${e.code}; carrying on)`);
+        if (isDeadToken(e)) {
+          this.markDead();
           return false;
         }
-        if (attempt === 0) await sleep(1000);
-        else {
-          this.failed += 1;
-          this.sys.err(`(progress report "${item.step}: ${item.status}" not sent: ${/** @type {Error} */ (e).message}; carrying on)`);
-        }
+        lastErr = e instanceof HubError ? e.code : /** @type {Error} */ (e).message;
+        if (isRateLimited(e)) await sleep(Math.min(retryAfterMs(e), 60_000));
+        else if (e instanceof HubError && e.code !== 'chat_unavailable') break;
+        else if (attempt >= 1) break;
+        else await sleep(1000);
       }
     }
+    this.failed += 1;
+    this.sys.err(`(progress report "${item.step}: ${item.status}" not sent: ${lastErr}; carrying on)`);
     return false;
   }
 
-  /** The hub answered `hello`: send what is queued, in order. @param {(route: string, body: any, t?: number) => Promise<any>} post */
+  /** The hub is reachable: send what is queued, in order. @param {(route: string, body: any, t?: number) => Promise<any>} post */
   async goLive(post) {
     this.post = post;
     /** @type {Map<string, { step: string, status: string, note?: string, at: Date }>} */
@@ -173,25 +201,33 @@ export class Reporter {
   }
 
   /**
-   * `ready` is the one report that must arrive: retry until `retrySec`.
-   * @param {number} retrySec
+   * `ready` is the one report that must arrive: retry (honouring Retry-After)
+   * until `retrySec`. A dead token cannot recover, so it ends at once.
+   * @param {string} step @param {'done'} status @param {string|undefined} note @param {number} retrySec
    */
   async mustSend(step, status, note, retrySec) {
     const deadline = Date.now() + retrySec * 1000;
     const body = { step, status, client_request_id: randomUUID(), ...(note ? { note } : {}) };
-    let lastErr = '';
-    while (this.post) {
+    let lastErr = this.dead ? 'the set-up command is no longer valid' : '';
+    while (this.post && !this.dead) {
+      let pause = 5000;
       try {
         await this.post('progress', body, 10_000);
         this.sent += 1;
         return true;
       } catch (e) {
+        if (isDeadToken(e)) {
+          this.dead = true;
+          lastErr = 'the set-up command is no longer valid';
+          break;
+        }
         lastErr = e instanceof HubError ? e.code : /** @type {Error} */ (e).message;
+        if (isRateLimited(e)) pause = retryAfterMs(e);
       }
       if (Date.now() >= deadline) break;
-      await sleep(Math.min(5000, Math.max(200, deadline - Date.now())));
+      await sleep(Math.min(pause, Math.max(200, deadline - Date.now())));
     }
-    this.sys.err(`The hub did not accept the "${step}" report (${lastErr || 'hub not reached'}).`);
+    this.sys.err(`The hub did not accept the "${step}" report (${lastErr || 'not sent'}).`);
     return false;
   }
 }
@@ -209,6 +245,8 @@ async function githubWebLogin(sys, waitSec) {
   const r = await sys.runTee('gh', ['auth', 'login', '--web', '--git-protocol', 'https', '--hostname', 'github.com', '--clipboard'], {
     timeoutMs: waitSec * 1000,
     onLine: (line) => {
+      const c = /one-time code(?: \(|: )([A-Z0-9]{4}-[A-Z0-9]{4})/i.exec(line);
+      if (c) sys.err(`>>> Your GitHub one-time code: ${c[1]} (also on your clipboard, if copying worked)`);
       const m = /(https:\/\/github\.com\/login\/device\S*)/.exec(line);
       if (m && !opened) {
         opened = true;
@@ -294,6 +332,21 @@ async function knownAs(hubUrl) {
   return who?.teammate ?? null;
 }
 
+/**
+ * One `GET /v1/whoami`: known teammate, unknown caller, refused otherwise, or down.
+ * @param {string} hubUrl
+ * @returns {Promise<{ reach: 'known', teammate: string } | { reach: 'unknown' } | { reach: 'refused', code: string, message: string } | { reach: 'down' }>}
+ */
+async function probeWhoami(hubUrl) {
+  try {
+    const r = await createClient({ hubUrl, via: 'cli', retryDelaysMs: [] }).whoami();
+    return r?.teammate ? { reach: 'known', teammate: r.teammate } : { reach: 'unknown' };
+  } catch (e) {
+    if (e instanceof HubError) return e.code === 'unknown_caller' ? { reach: 'unknown' } : { reach: 'refused', code: e.code, message: e.message };
+    return { reach: 'down' };
+  }
+}
+
 /** Assistants installed on this machine (ids), for the identity report. @param {import('./sys.js').Sys} sys */
 export function detectedAssistants(sys) {
   const ids = [];
@@ -363,78 +416,100 @@ export async function runOnboarding(sys, o) {
     await R.report('tailscale-sign-in', tsAlready ? 'skipped' : 'done');
     sys.err(`Tailscale: signed in${ts.login ? ` as ${ts.login}` : ''}`);
 
-    // The hub, through Tailscale (and the share, if one was sent).
+    // The hub, through Tailscale (and the share, if one was sent). Once it
+    // answers, `whoami` first: a teammate it already knows (the command pasted
+    // again after registration) skips hello, identity and the wait.
     step('Hub');
     const client = { name: 'ask', version: VERSION, host, os: sys.platform };
     const deadline = Date.now() + hubWaitSec * 1000;
     let hello = null;
+    let knownName = null;
     let shareOpened = false;
     let lastNote = 0;
-    let alreadyKnown = false;
     for (;;) {
-      try {
-        hello = await post('hello', { client }, 15_000);
+      const who = await probeWhoami(o.hubUrl);
+      if (who.reach === 'known') {
+        knownName = who.teammate;
         break;
-      } catch (e) {
-        if (e instanceof HubError) {
-          if (e.code === 'invalid_token') {
-            // A second run after a completed registration: the token is spent, but the hub knows us.
-            const who = await knownAs(o.hubUrl);
-            if (who) {
-              alreadyKnown = true;
-              sys.err(`The hub already knows you as ${who}; skipping registration.`);
-              break;
-            }
-            throw new OnboardingStop(`this set-up command is no longer valid (refused, expired or already used). ${NEW_COMMAND}`, EXIT_REFUSED);
-          }
-          if (e.code === 'caller_unidentified') throw new OnboardingStop('the hub cannot see a Tailscale login for this Mac. Make sure Tailscale is signed in (menu bar icon), then paste the same command again.', EXIT_REFUSED);
-          if (e.code !== 'rate_limited' && e.code !== 'chat_unavailable') throw new OnboardingStop(`the hub refused the set-up (${e.code}: ${e.message}). Send this line to Jose.`, EXIT_REFUSED);
-        }
-        if (o.share && !shareOpened) {
-          shareOpened = true;
-          sys.err('The hub is not reachable yet. Opening the Tailscale share link in your browser: accept it (sign in to Tailscale there if asked).');
-          if (!(await sys.openUrl(o.share))) sys.err('Could not open the browser: open the share link from your Slack message by hand.');
-        }
-        if (Date.now() >= deadline) {
-          throw new OnboardingStop(
-            `the hub at ${o.hubUrl} was not reachable for ${hubWaitSec >= 60 ? `${Math.round(hubWaitSec / 60)} minutes` : `${hubWaitSec} seconds`}. Check that Tailscale is on${o.share ? ' and that you accepted the share link from your Slack message' : ''}, then paste the same command again (it is safe to repeat).`,
-            EXIT_UNREACHABLE,
-          );
-        }
-        if (Date.now() - lastNote > 30_000) {
-          lastNote = Date.now();
-          const left = Math.max(0, Math.round((deadline - Date.now()) / 60_000));
-          sys.err(`waiting for the hub at ${o.hubUrl}${o.share ? ' (accept the Tailscale share in your browser)' : ''}… (gives up in ${left} min)`);
-        }
-        await sleep(pollMs);
       }
+      if (who.reach === 'unknown') {
+        try {
+          hello = await post('hello', { client }, 15_000);
+          break;
+        } catch (e) {
+          if (isRateLimited(e)) {
+            sys.err(`(the hub asks to slow down; waiting ${Math.round(retryAfterMs(e) / 1000)}s)`);
+            await sleep(retryAfterMs(e));
+            continue;
+          }
+          if (isDeadToken(e)) throw new OnboardingStop(`this set-up command is no longer valid (refused, expired or already used). ${NEW_COMMAND}`, EXIT_REFUSED);
+          if (e instanceof HubError && e.code === 'caller_unidentified') throw new OnboardingStop('the hub cannot see a Tailscale login for this Mac. Make sure Tailscale is signed in (menu bar icon), then paste the same command again.', EXIT_REFUSED);
+          if (e instanceof HubError && e.code !== 'chat_unavailable') throw new OnboardingStop(`the hub refused the set-up (${e.code}: ${e.message}). Send this line to Jose.`, EXIT_REFUSED);
+        }
+      } else if (who.reach === 'refused') {
+        throw new OnboardingStop(`the hub refused (${who.code}: ${who.message}). Send this line to Jose.`, EXIT_REFUSED);
+      }
+      // Not reachable (yet).
+      if (o.share && !shareOpened) {
+        shareOpened = true;
+        sys.err('The hub is not reachable yet. Opening the Tailscale share link in your browser: accept it (sign in to Tailscale there if asked).');
+        if (!(await sys.openUrl(o.share))) sys.err('Could not open the browser: open the share link from your Slack message by hand.');
+      }
+      if (Date.now() >= deadline) {
+        throw new OnboardingStop(
+          `the hub at ${o.hubUrl} was not reachable for ${hubWaitSec >= 60 ? `${Math.round(hubWaitSec / 60)} minutes` : `${hubWaitSec} seconds`}. Check that Tailscale is on${o.share ? ' and that you accepted the share link from your Slack message' : ''}, then paste the same command again (it is safe to repeat).`,
+          EXIT_UNREACHABLE,
+        );
+      }
+      if (Date.now() - lastNote > 30_000) {
+        lastNote = Date.now();
+        const left = Math.max(0, Math.round((deadline - Date.now()) / 60_000));
+        sys.err(`waiting for the hub at ${o.hubUrl}${o.share ? ' (accept the Tailscale share in your browser)' : ''}… (gives up in ${left} min)`);
+      }
+      await sleep(pollMs);
     }
     await R.goLive(post);
     await R.report('hub-reached', 'done');
-    sys.err(alreadyKnown ? 'Hub reached.' : `Hub reached; it knows you as ${hello.display_name} (Tailscale ${hello.tailscale_login ?? 'unknown'}).`);
 
-    // Identity and the approver's tap.
-    if (alreadyKnown || hello?.state === 'registered') {
+    if (knownName) {
+      sys.err(`Hub reached; it already knows you as ${knownName}, so registration is skipped.`);
       await R.report('identity', 'skipped', 'already registered');
       await R.report('registered', 'skipped', 'already registered');
     } else {
+      sys.err(`Hub reached; it knows you as ${hello.display_name} (Tailscale ${hello.tailscale_login ?? 'unknown'}).`);
+      let approver = typeof hello.approver === 'string' && hello.approver ? hello.approver : null;
+
+      // Identity.
       step('Identity');
       await R.report('identity', 'started');
       const tools = detectedAssistants(sys);
-      try {
-        await post('identity', { github_login: githubLoginName, os: sys.platform, host, tools }, 20_000);
-      } catch (e) {
-        if (e instanceof HubError && e.code === 'identity_conflict') {
-          throw new OnboardingStop(`the hub already has a different identity for this set-up command (another Mac or GitHub account). ${NEW_COMMAND}`, EXIT_REFUSED);
+      const idDeadline = Date.now() + hubWaitSec * 1000;
+      for (;;) {
+        try {
+          await post('identity', { github_login: githubLoginName, os: sys.platform, host, tools }, 20_000);
+          break;
+        } catch (e) {
+          if (isRateLimited(e)) {
+            await sleep(retryAfterMs(e));
+            continue;
+          }
+          if (e instanceof HubError && e.code === 'identity_conflict') {
+            throw new OnboardingStop(`the hub already has a different identity for this set-up command (another Mac or GitHub account). ${NEW_COMMAND}`, EXIT_REFUSED);
+          }
+          if (isDeadToken(e)) throw new OnboardingStop(`this set-up command is no longer valid (refused, expired or already used). ${NEW_COMMAND}`, EXIT_REFUSED);
+          if (e instanceof HubError && e.code !== 'chat_unavailable') throw new OnboardingStop(`the hub refused your identity report (${e.code}: ${e.message}). Send this line to Jose.`, EXIT_REFUSED);
+          if (Date.now() >= idDeadline) throw new OnboardingStop(`the hub stopped answering (${/** @type {Error} */ (e).message}). Paste the same command again.`, EXIT_UNREACHABLE);
+          await sleep(Math.max(pollMs, 1000));
         }
-        if (e instanceof HubError && e.code === 'invalid_token') throw new OnboardingStop(`this set-up command is no longer valid. ${NEW_COMMAND}`, EXIT_REFUSED);
-        throw new OnboardingStop(`could not report your identity to the hub (${/** @type {Error} */ (e).message}). Paste the same command again.`, e instanceof HubError ? EXIT_REFUSED : EXIT_UNREACHABLE);
       }
       await R.report('identity', 'done', `GitHub ${githubLoginName}, ${sys.platform}, tools: ${tools.join(', ') || 'none'}`);
 
+      // The approver's tap.
       step('Registration');
       await R.report('registered', 'started', 'waiting for approval in Slack');
-      sys.err('Waiting for your registration to be confirmed in Slack… (nothing to do here; this waits as long as your set-up command is valid)');
+      const waiting = () =>
+        sys.err(`Waiting for ${approver ?? 'your registration to be confirmed'}${approver ? ' to confirm in Slack' : ' in Slack'}… (nothing to do here; this waits as long as your set-up command is valid)`);
+      waiting();
       let backoff = 1000;
       for (;;) {
         let st;
@@ -442,21 +517,24 @@ export async function runOnboarding(sys, o) {
           st = await post('status', { wait: statusWait }, (statusWait + 15) * 1000);
           backoff = 1000;
         } catch (e) {
-          if (e instanceof HubError && e.code === 'invalid_token') {
-            // After approval the token works for progress only, so a poll that
-            // missed the moment sees 401: the hub knowing us means registered.
-            const who = await knownAs(o.hubUrl);
-            if (who) {
-              st = { state: 'registered', teammate: who };
-            } else {
-              throw new OnboardingStop(`this set-up command is no longer valid (it expired, or the registration was refused). ${NEW_COMMAND}`, EXIT_REFUSED);
-            }
+          if (isDeadToken(e)) {
+            // A poll that missed the moment: knowing us means registered.
+            const name = await knownAs(o.hubUrl);
+            if (name) st = { state: 'registered', teammate: name };
+            else throw new OnboardingStop(`this set-up command is no longer valid (refused, expired or already used). ${NEW_COMMAND}`, EXIT_REFUSED);
+          } else if (isRateLimited(e)) {
+            await sleep(retryAfterMs(e));
+            continue;
           } else {
-            if (e instanceof HubError && e.code !== 'rate_limited' && e.code !== 'chat_unavailable') throw new OnboardingStop(`the hub refused (${e.code}).`, EXIT_REFUSED);
+            if (e instanceof HubError && e.code !== 'chat_unavailable') throw new OnboardingStop(`the hub refused (${e.code}).`, EXIT_REFUSED);
             await sleep(backoff);
             backoff = Math.min(backoff * 2, 30_000);
             continue;
           }
+        }
+        if (!approver && typeof st.approver === 'string' && st.approver) {
+          approver = st.approver;
+          waiting();
         }
         if (st.state === 'registered') {
           sys.err(`Registered${st.teammate ? ` as ${st.teammate}` : ''}.`);
@@ -464,7 +542,7 @@ export async function runOnboarding(sys, o) {
           break;
         }
         if (st.state === 'refused') {
-          throw new OnboardingStop(`your registration was refused in Slack. Nothing was set up on this Mac. If that was a mistake: ${NEW_COMMAND}`, EXIT_REFUSED);
+          throw new OnboardingStop(`your registration was refused in Slack${approver ? ` by ${approver}` : ''}. Nothing was set up on this Mac. If that was a mistake: ${NEW_COMMAND}`, EXIT_REFUSED);
         }
       }
     }

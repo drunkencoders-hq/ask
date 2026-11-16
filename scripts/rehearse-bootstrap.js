@@ -65,7 +65,10 @@ esac\n`,
   install) printf '#!/bin/bash\\nexec node %q/src/cli.js "$@"\\n' "$3" >"${prefix}/bin/ask"; chmod +x "${prefix}/bin/ask" ;;
   *) exit 1 ;;
 esac\n`,
-    sudo: `${head}[ "$1" = -v ] && exit 0\nexit 1\n`,
+    // STUB_SUDO: ok (default) | refused (three wrong passwords)
+    sudo: `${head}[ "$1" = -v ] || exit 1
+if [ "\${STUB_SUDO:-ok}" = refused ]; then printf 'Sorry, try again.\\nSorry, try again.\\nsudo: 3 incorrect password attempts\\n' >&2; exit 1; fi
+exit 0\n`,
     git: `${head}echo "git version 2.99.0"\n`,
   };
   for (const [name, body] of Object.entries(files)) {
@@ -75,7 +78,8 @@ esac\n`,
 
 /**
  * @param {string} name
- * @param {{ installed?: boolean, decision?: 'register'|'refuse'|'expire', unreachable?: boolean, failProgress?: number }} sc
+ * @param {{ installed?: boolean, decision?: 'register'|'refuse'|'expire', unreachable?: boolean, failProgress?: number,
+ *           sudo?: 'refused'|'nonadmin', throttle?: Record<string, number>, repaste?: boolean, tokenDead?: boolean }} sc
  */
 async function rehearse(name, sc) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ask-rehearsal-'));
@@ -105,6 +109,10 @@ async function rehearse(name, sc) {
   // npm comes with Node: the stub sits in the catalog until `brew install node`.
   fs.renameSync(path.join(stubbin, 'npm'), path.join(catalog, 'npm'));
 
+  if (sc.sudo === 'nonadmin') {
+    // `id -Gn` without the admin group; everything else is the real id.
+    fs.writeFileSync(path.join(stubbin, 'id'), `#!/bin/bash\nprintf '%s\\n' "id $*" >>"$STUB_LOG"\nif [ "$1" = -Gn ]; then echo "staff everyone localaccounts"; exit 0; fi\nexec /usr/bin/id "$@"\n`, { mode: 0o755 });
+  }
   if (sc.installed) {
     for (const f of ['brew', 'git', 'npm']) fs.copyFileSync(path.join(catalog, f), path.join(prefix, 'bin', f));
     for (const f of ['gh', 'tailscale', 'claude']) for (const e of ['', '.mjs']) fs.copyFileSync(path.join(catalog, f + e), path.join(prefix, 'bin', f + e));
@@ -123,7 +131,11 @@ async function rehearse(name, sc) {
     autoAnswerMs: 400,
     autoAnswerText: 'Yes, I can see it. Welcome aboard!',
     reachable: () => !sc.unreachable && (sc.installed || shareAccepted()),
-    onboarding: { token: TOKEN, displayName: 'Nora', teammate: 'nora', mentor: 'jose', decision: sc.decision ?? 'register', decideAfterMs: 1000, failProgress: sc.failProgress ?? 0 },
+    onboarding: {
+      token: TOKEN, displayName: 'Nora', teammate: 'nora', mentor: 'jose', approver: 'Jose',
+      decision: sc.decision ?? 'register', decideAfterMs: 1000, failProgress: sc.failProgress ?? 0,
+      throttle: sc.throttle, retryAfterSec: 1, registered: !!sc.repaste, tokenDead: !!sc.tokenDead,
+    },
   });
 
   const env = {
@@ -138,6 +150,7 @@ async function rehearse(name, sc) {
     DC_BREW_PATHS: path.join(prefix, 'bin', 'brew'),
     DC_APPS_DIR: appsDir,
     STUB_LOG: log,
+    STUB_SUDO: sc.sudo === 'refused' ? 'refused' : 'ok',
     STUB_STATE_DIR: stateDir,
     STUB_SHARE_URL: SHARE,
     STUB_GH: sc.installed ? 'ok' : 'signed_out',
@@ -182,6 +195,7 @@ async function rehearse(name, sc) {
   if (out.includes(TOKEN)) leaks.push('(captured output)');
   const standby = hub.state.statusPosts.some((l) => l.startsWith('Standby verified: nora'));
   const firstQ = hub.state.createBodies.some((b) => b.kind === 'question' && /^Set-up test from /.test(b.question));
+  const callCounts = { ...hub.state.calls };
   const configWritten = fs.existsSync(path.join(env.XDG_CONFIG_HOME, 'drunkencoders', 'ask.json'));
 
   await hub.close();
@@ -192,8 +206,27 @@ async function rehearse(name, sc) {
   if (leftovers.length) problems.push(`left in the temp dir: ${leftovers.join(', ')}`);
   if (questions) problems.push(`${questions} question(s) asked`);
   if (!inOrder) problems.push(`steps out of order: ${ob.progress.map((p) => p.step).join(' ')}`);
+  const onbCalls = ['hello', 'identity', 'status'].reduce((n, r) => n + (callCounts[`POST /v1/onboarding/${r}`] ?? 0), 0);
   let summary;
-  if (!sc.decision && !sc.unreachable) {
+  if (sc.sudo) {
+    const expectLine = sc.sudo === 'nonadmin' ? /Your Mac account is not an administrator/ : /macOS did not accept the password/;
+    if (code !== 1) problems.push(`exit ${code}, expected 1`);
+    if (!expectLine.test(out)) problems.push('stop message missing');
+    if (/Homebrew\/install/.test(stubLog)) problems.push('the Homebrew installer ran');
+    if (sc.sudo === 'nonadmin' && /^sudo /m.test(stubLog)) problems.push('sudo was run for a non-admin account');
+    if ((stubLog.match(/^sudo /gm) ?? []).length > 1) problems.push('sudo run more than once');
+    summary = `REHEARSAL ${name} OK: exit ${code}, Homebrew not installed, one clear line (${sc.sudo === 'nonadmin' ? 'not an administrator' : 'password not accepted'})`;
+  } else if (sc.repaste) {
+    if (code !== 0) problems.push(`exit ${code}`);
+    if (onbCalls) problems.push(`${onbCalls} hello/identity/status call(s) although whoami knew us`);
+    if (!standby) problems.push('no "Standby verified"');
+    if (!firstQ) problems.push('no first question');
+    if (sc.tokenDead) {
+      if (ob.progress.length) problems.push('reports accepted with a dead token');
+      if ((out.match(/no longer accepts progress reports/g) ?? []).length !== 1) problems.push('not exactly one line about dropped reports');
+    } else if (finals.get('ready') !== 'done') problems.push('ready not reported done');
+    summary = `REHEARSAL ${name} OK: exit ${code}, whoami known, onboarding routes not called, standby verified, ${sc.tokenDead ? 'reports dropped with one line (token dead)' : 'ready reported'}, first question sent`;
+  } else if (!sc.decision && !sc.unreachable) {
     const missing = STEPS.filter((s) => !finals.has(s));
     if (code !== 0) problems.push(`exit ${code}`);
     if (missing.length && !sc.failProgress) problems.push(`steps never reported: ${missing.join(', ')}`);
@@ -206,6 +239,7 @@ async function rehearse(name, sc) {
     if (sc.installed && installs.length) problems.push(`installs: ${installs.join('; ')}`);
     if (!sc.installed && !sc.failProgress && installs.length !== 7) problems.push(`expected 7 installs, saw ${installs.length}: ${installs.join('; ')}`);
     summary = `BOOTSTRAP OK: ${installs.length} installs, ${questions} questions asked, ${finals.size} steps reported in order, registered after approval, standby verified, first question sent`;
+    if (sc.throttle) summary = `REHEARSAL ${name} OK: ${ob.throttled.length} calls answered 429 with Retry-After (${ob.throttled.join(', ')}); waited and completed: exit ${code}, ${finals.size} steps reported, registered, standby verified, ready reported`;
     if (sc.failProgress) summary = `REHEARSAL ${name} OK: ${sc.failProgress} progress reports refused by the hub (lost: ${missing.join(', ') || 'none'}), set-up still completed: exit ${code}, registered, standby verified, ready reported, first question sent`;
   } else if (sc.decision) {
     if (code !== 5) problems.push(`exit ${code}, expected 5`);
@@ -233,6 +267,11 @@ const SCENARIOS = {
   expired: { decision: /** @type {const} */ ('expire') },
   unreachable: { unreachable: true },
   'progress-fail': { failProgress: 6 },
+  'rate-limited': { installed: true, throttle: { hello: 1, identity: 1, status: 1, progress: 2 } },
+  repaste: { installed: true, repaste: true },
+  'repaste-dead': { installed: true, repaste: true, tokenDead: true },
+  'sudo-refused': { sudo: /** @type {const} */ ('refused') },
+  'non-admin': { sudo: /** @type {const} */ ('nonadmin') },
 };
 
 if (process.platform !== 'darwin') {

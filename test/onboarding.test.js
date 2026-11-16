@@ -104,6 +104,9 @@ test('onboarding: nothing signed in, hub behind a share → registered after app
     assert.match(log, /^open https:\/\/login\.tailscale\.com\/a\/stub0123$/m);
     assert.equal((log.match(new RegExp(`^open ${SHARE.replace(/[/.]/g, '\\$&')}$`, 'gm')) ?? []).length, 1);
     assert.match(log, /^gh auth login --web --git-protocol https --hostname github\.com --clipboard$/m);
+    assert.match(r.stderr, /^>>> Your GitHub one-time code: ABCD-1234 /m);
+    assert.match(r.stderr, /Waiting for Jose to confirm in Slack…/);
+    assert.equal(hub.state.onboarding.progress.some((p) => (p.note ?? '').includes('ABCD-1234')), false, 'code not in a report');
     // The normal setup ran after registration: config, MCP, standby.
     assert.deepEqual(JSON.parse(fs.readFileSync(t.configFile, 'utf8')), { hub_url: hub.url });
     assert.match(r.stdout, new RegExp(`^Standby verified: nora via ${hub.url.replace(/[/.:]/g, '\\$&')}$`, 'm'));
@@ -149,7 +152,8 @@ test('onboarding: registration refused → exit 5, nothing set up locally', asyn
   try {
     const r = await runCli(['setup', '--hub', hub.url], { ...t, env: { ...t.env, ASK_ONBOARDING_TOKEN: TOKEN } }).done;
     assert.equal(r.code, 5, r.stderr);
-    assert.match(r.stderr, /ask setup: FAILED: your registration was refused in Slack\. Nothing was set up on this Mac/);
+    assert.match(r.stderr, /Waiting for Jose to confirm in Slack…/);
+    assert.match(r.stderr, /ask setup: FAILED: your registration was refused in Slack by Jose\. Nothing was set up on this Mac/);
     assert.equal(fs.existsSync(t.configFile), false, 'no config written');
     assert.equal(fs.existsSync(path.join(t.home, '.claude.json')), false, 'no MCP registration');
     assert.doesNotMatch(r.stderr + r.stdout, new RegExp(TOKEN));
@@ -208,14 +212,54 @@ test('onboarding: progress reports failing → set-up still completes; ready ret
   }
 });
 
-test('onboarding: second run after registration (token spent) → continues as a known teammate', async () => {
-  const hub = await startStubHub({ teammate: null, onboarding: { token: TOKEN, registered: true } });
+for (const dead of [false, true]) {
+  test(`onboarding: command pasted again after registration${dead ? ', token already dead' : ''} → whoami known, onboarding routes not called, set-up completes`, async () => {
+    const hub = await startStubHub({ teammate: null, onboarding: { token: TOKEN, registered: true, tokenDead: dead } });
+    const t = env({ hub });
+    try {
+      const r = await runCli(['setup', '--hub', hub.url, '--token', TOKEN, '--no-first-question'], t).done;
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stderr, /it already knows you as nora, so registration is skipped/);
+      for (const route of ['hello', 'identity', 'status']) assert.equal(hub.state.calls[`POST /v1/onboarding/${route}`] ?? 0, 0, route);
+      assert.match(r.stdout, /^Standby verified: nora via /m);
+      if (dead) {
+        assert.equal((r.stderr.match(/no longer accepts progress reports/g) ?? []).length, 1, 'one printed line for the dropped reports');
+        assert.match(r.stderr, /The hub did not accept the "ready" report \(the set-up command is no longer valid\)/);
+        assert.equal(hub.state.onboarding.progress.length, 0);
+      } else {
+        assert.equal(steps(hub).at(-1), 'ready:done');
+      }
+    } finally {
+      await hub.close();
+      t.cleanup();
+    }
+  });
+}
+
+test('onboarding: 429 with Retry-After on hello, identity, status and progress → waits, then completes', async () => {
+  const hub = await startStubHub({ teammate: null, onboarding: { token: TOKEN, retryAfterSec: 1, throttle: { hello: 1, identity: 1, status: 1, progress: 2 } } });
+  const t = env({ hub });
+  try {
+    const t0 = Date.now();
+    const r = await runCli(['setup', '--hub', hub.url, '--token', TOKEN, '--no-first-question'], t).done;
+    assert.equal(r.code, 0, r.stderr);
+    assert.ok(Date.now() - t0 >= 4000, 'waited for Retry-After each time');
+    assert.deepEqual(hub.state.onboarding.throttled.sort(), ['hello', 'identity', 'progress', 'progress', 'status']);
+    assert.doesNotMatch(r.stderr, /not sent/, 'no report lost to a 429');
+    assert.equal(steps(hub).at(-1), 'ready:done');
+  } finally {
+    await hub.close();
+    t.cleanup();
+  }
+});
+
+test('onboarding: no approver name from the hub → generic waiting line', async () => {
+  const hub = await startStubHub({ teammate: null, onboarding: { token: TOKEN, approver: null } });
   const t = env({ hub });
   try {
     const r = await runCli(['setup', '--hub', hub.url, '--token', TOKEN, '--no-first-question'], t).done;
     assert.equal(r.code, 0, r.stderr);
-    assert.match(r.stderr, /already knows you as nora; skipping registration/);
-    assert.equal(hub.state.onboarding.identityCalls, 0);
+    assert.match(r.stderr, /Waiting for your registration to be confirmed in Slack…/);
   } finally {
     await hub.close();
     t.cleanup();

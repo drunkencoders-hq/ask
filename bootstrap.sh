@@ -136,12 +136,30 @@ find_brew() {
   return 1
 }
 
-install_homebrew() {
-  # Homebrew's installer in non-interactive mode asks nothing, but it can use
-  # sudo only when sudo is already authorised: macOS asks for the password here.
+# The one use of sudo in this script (decision 96): only when Homebrew is
+# missing, `sudo -v` once, so that macOS asks for the Mac password in this
+# Terminal and Homebrew's non-interactive installer (which cannot ask) may use
+# it. The script never sees or stores the password and runs nothing as admin.
+is_admin() { id -Gn 2>/dev/null | tr ' ' '\n' | grep -qx admin; }
+
+authorise_sudo_for_homebrew() {
+  if ! is_admin; then
+    say "     Your Mac account is not an administrator, so Homebrew cannot be installed. Ask whoever manages this Mac to make your account an administrator (System Settings > Users & Groups), or to install Homebrew from https://brew.sh, then paste the same command again."
+    return 1
+  fi
   say "     macOS will ask for your Mac password (for Homebrew's installer). Type it and press Return; nothing shows while you type."
-  # sudo reads the password from the terminal itself (stdin is this script).
-  sudo -v || { say "     Your Mac account must be an administrator, and the password correct."; return 1; }
+  if has_tty; then
+    # shellcheck disable=SC2024 # sudo reads the password from the terminal itself
+    sudo -v </dev/tty && return 0
+  else
+    sudo -v && return 0
+  fi
+  say "     macOS did not accept the password. Paste the same command again and type your Mac password when asked."
+  return 1
+}
+
+install_homebrew() {
+  authorise_sudo_for_homebrew || return 1
   NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL "$HOMEBREW_INSTALLER")" </dev/null
 }
 
@@ -158,7 +176,7 @@ ensure_homebrew() {
     install homebrew "sudo -v; NONINTERACTIVE=1 /bin/bash -c \"\$(curl -fsSL $HOMEBREW_INSTALLER)\""
     return 0
   fi
-  install homebrew install_homebrew || fail "the Homebrew installer did not finish. Fix what it reported, then paste the same command again."
+  install homebrew install_homebrew || fail "Homebrew was not installed (see the line above). Fix that, then paste the same command again."
   brew_bin="$(find_brew)" || fail "Homebrew was installed but brew cannot be found. Open a new Terminal window and paste the same command again."
   eval "$("$brew_bin" shellenv)"
 }
