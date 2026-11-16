@@ -7,7 +7,9 @@ import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 import { resolveHubUrl, ConfigError } from './config.js';
 import { PendingStore, pendingFilePath } from './pending.js';
-import { gitInfo } from './gitinfo.js';
+import { gitInfo, gitTop } from './gitinfo.js';
+import { isRich, prepareRich } from './rich.js';
+import path from 'node:path';
 import {
   VERSION,
   createClient,
@@ -37,19 +39,25 @@ Usage:
   ask "question text" [--repo org/name | --project slug] [--branch name]
                       [--context-file path | --context -]   (- reads stdin)
                       [--timeout seconds]   default 0 = wait until answered
-                      [--json]
-  ask --resume [id]   fetch the answer to an earlier question (default: most recent pending)
+                      [--json] [--no-save]
+  ask --resume [id] [--no-save]   fetch the answer to an earlier question (default: most recent pending)
   ask --list          my questions still pending or answered-but-undelivered
   ask mcp             run the MCP server on stdio
   ask --version | --help
   ask setup --hub <url>             configure, sign in, register MCP, verify
   ask setup --unregister            remove MCP entries and the config file
-  ask doctor                        read-only health checks
+  ask doctor [--json]               read-only health checks
+  ask agents-snippet                print the AGENTS.md text for projects not made from the starters
   ask standby                       send a standby test through the hub
 
 Exit codes: 0 answered and receipt recorded · 2 configuration or usage error ·
 3 still pending at --timeout · 4 hub unreachable · 5 hub refused ·
 6 question failed on the hub
+
+Rich answers (drafted by the mentor): diagrams are saved as Mermaid files in
+docs/diagrams of the git work tree you ran this in, images in docs/diagrams/assets
+(nothing is committed); --no-save, or no work tree, saves them under ask's state
+folder instead. Scripts in an answer are shown as proposals and are never run by ask.
 `;
 
 class UsageError extends Error {}
@@ -78,6 +86,7 @@ function parse(argv) {
         context: { type: 'string' },
         timeout: { type: 'string' },
         json: { type: 'boolean' },
+        'no-save': { type: 'boolean' },
         resume: { type: 'boolean' },
         list: { type: 'boolean' },
         version: { type: 'boolean', short: 'v' },
@@ -130,7 +139,7 @@ function fail(e) {
  * Wait for a question, print it, send the receipt. Shared by ask and --resume.
  * @param {ReturnType<typeof createClient>} client @param {PendingStore} store
  * @param {{ id: string, client_request_id?: string }} entry
- * @param {{ timeoutSec: number, json: boolean, signal: AbortSignal }} o
+ * @param {{ timeoutSec: number, json: boolean, signal: AbortSignal, noSave?: boolean }} o
  */
 async function waitPrintReceipt(client, store, entry, o) {
   let shownPermalink = false;
@@ -158,13 +167,28 @@ async function waitPrintReceipt(client, store, entry, o) {
     return EXIT.FAILED;
   }
   // answered (or already delivered): print as data, then confirm delivery.
+  // A rich answer (scripts, diagrams, images; contract changes 5 and 6) is downloaded and saved first;
+  // a plain answer prints exactly as before.
+  const rich = isRich(q)
+    ? await prepareRich({
+        client,
+        q,
+        question: /** @type {any} */ (entry).question,
+        workTree: o.noSave ? null : await gitTop(process.cwd()),
+        stateDir: path.dirname(pendingFilePath()),
+        noSave: o.noSave,
+      })
+    : null;
   if (o.json) {
     process.stdout.write(
       // route, answerer and comments are passed through verbatim when the hub sends them (contract change 2).
-      JSON.stringify({ id: q.id, status: 'answered', project: q.project, answer: q.answer, card: q.card, route: q.route, answerer: q.answerer, comments: q.comments }) + '\n',
+      JSON.stringify({
+        id: q.id, status: 'answered', project: q.project, answer: q.answer, card: q.card, route: q.route, answerer: q.answerer, comments: q.comments,
+        ...(rich ? { saved: rich.saved, attachments: rich.downloads.map((d) => ({ id: d.att.id, filename: d.att.filename, ok: d.data !== null, error: d.error })) } : {}),
+      }) + '\n',
     );
   } else {
-    process.stdout.write(formatAnswer(q) + '\n');
+    process.stdout.write((rich ? rich.text : formatAnswer(q)) + '\n');
   }
   const r = await sendReceipt(client, store, entry);
   if (!r.ok) {
@@ -183,6 +207,10 @@ async function waitPrintReceipt(client, store, entry, o) {
  */
 export async function main(argv) {
   const sub = argv[0];
+  if (sub === 'agents-snippet' && argv.length === 1) {
+    process.stdout.write(fs.readFileSync(new URL('../docs/agents-snippet.md', import.meta.url), 'utf8'));
+    return EXIT.OK;
+  }
   if (sub === 'mcp') {
     const { runMcpServer } = await import('./mcp.js');
     await runMcpServer();
@@ -226,6 +254,7 @@ export async function main(argv) {
     }
     const timeoutSec = parseTimeout(values.timeout);
     const json = !!values.json;
+    const noSave = !!values['no-save'];
 
     const { hubUrl } = resolveHubUrl();
     const store = new PendingStore(pendingFilePath());
@@ -276,7 +305,7 @@ export async function main(argv) {
         client,
         store,
         { id, client_request_id: entry?.client_request_id ?? target.client_request_id },
-        { timeoutSec, json, signal: ac.signal },
+        { timeoutSec, json, signal: ac.signal, noSave },
       );
     }
 
@@ -327,7 +356,7 @@ export async function main(argv) {
     } catch {}
     err(`Asked ${entry.id} (${project ? `project ${project}` : repo}${branch ? `, branch ${branch}` : ''}). ${answerer ? `Waiting for ${answerer}'s answer…` : "Waiting for the owner's answer…"}`);
     err(`If you stop waiting, fetch the answer later with: ask --resume ${entry.id}`);
-    return await waitPrintReceipt(client, store, /** @type {any} */ (entry), { timeoutSec, json, signal: ac.signal });
+    return await waitPrintReceipt(client, store, /** @type {any} */ (entry), { timeoutSec, json, signal: ac.signal, noSave });
   } catch (e) {
     if (e instanceof Aborted) return EXIT.INTERRUPTED;
     return fail(e);

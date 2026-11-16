@@ -3,6 +3,7 @@
 // (brief 01, "Hub HTTP API v1") closely enough to test the ask client.
 // Not a product. Single caller identity per stub (configurable).
 import http from 'node:http';
+import { createHash, randomUUID } from 'node:crypto';
 
 const TERMINAL_WAKE = new Set(['answered', 'delivered', 'failed']);
 
@@ -14,7 +15,7 @@ const TERMINAL_WAKE = new Set(['answered', 'delivered', 'failed']);
  *   autoAnswerMs?: number|null,        // answer every new question after this many ms
  *   autoAnswerText?: string,
  *   mentors?: Record<string, string>,  // mentee → mentor (contract change 2); default none
- *   legacy?: boolean,                  // answer in the pre-change-2 shape (no route/answerer/comments/source on lists)
+ *   legacy?: boolean,                  // answer in the pre-change-2 shape (also: no contract-5 answer fields) (no route/answerer/comments/source on lists)
  *   reachable?: () => boolean,         // false → every connection is dropped (hub not reachable yet)
  *   onboarding?: OnboardingOptions,    // contract change 4 (brief 08a §D)
  * }} StubOptions
@@ -54,6 +55,10 @@ export async function startStubHub(opts = {}) {
     seq: 0,
     /** count of incoming requests per "METHOD path-pattern" */
     calls: /** @type {Record<string, number>} */ ({}),
+    /** @type {Map<string, any>} contract change 6: "<question id>|<attachment id>" → file */
+    files: new Map(),
+    attachmentCalls: 0,
+    failAttachments: 0, // next N attachment downloads → socket destroyed
     /** fault injection */
     dropNextCreateResponses: 0, // process the create (new or repeated), then destroy the socket
     failReceipts: 0, // next N receipts → socket destroyed
@@ -109,7 +114,24 @@ export async function startStubHub(opts = {}) {
 
   /** @param {any} q @param {string} text @param {string} [by] @param {string} [via] */
   const answer = (q, text, by = q.answerer ?? q.owner, via = 'thread') =>
-    setQ(q, { status: 'answered', answer: { text, option_id: null, answered_by: by, answered_at: new Date().toISOString(), via } });
+    setQ(q, {
+      status: 'answered',
+      answer: {
+        text, option_id: null, answered_by: by, answered_at: new Date().toISOString(), via,
+        // contract change 5: every answer carries the draft fields (plain / [] outside drafts); an older hub does not.
+        ...(state.legacy ? {} : { format: 'plain', scripts: [], diagrams: [], sources: [], caveats: [], attachments: [] }),
+      },
+    });
+
+  /** answer.text for a sent draft, as the hub builds it (draftAnswerText). */
+  const draftText = (d) => {
+    const out = [d.summary, '', d.body];
+    for (const s of d.scripts ?? []) out.push('', `**${s.title}** (${s.runs_on}; risk: ${s.risk})`, s.what_it_does, '', '```' + s.language, s.code, '```');
+    for (const g of d.diagrams ?? []) out.push('', `**${g.title}**`, '', '```mermaid', g.mermaid, '```');
+    if (d.sources?.length) out.push('', 'Sources:', ...d.sources.map((x) => `- ${x.kind}: ${x.path}${x.ref ? ` @ ${x.ref}` : ''}`));
+    if (d.caveats?.length) out.push('', 'Not checked:', ...d.caveats.map((c) => `- ${c}`));
+    return out.join('\n');
+  };
 
   const newId = () => {
     state.seq += 1;
@@ -438,6 +460,28 @@ export async function startStubHub(opts = {}) {
       return send(res, 200, { questions: qs });
     }
 
+    const ma = /^\/v1\/questions\/([^/]+)\/attachments\/([^/]+)$/.exec(p);
+    if (ma && m === 'GET') {
+      const q = state.questions.get(decodeURIComponent(ma[1]));
+      const file = q && q.asked_by === me ? state.files.get(`${q.id}|${decodeURIComponent(ma[2])}`) : null;
+      if (!file) return error(res, 404, 'unknown_attachment', 'No such file for you.'); // not the asker / unknown: 404, ids reveal nothing
+      state.attachmentCalls += 1;
+      if (file.gone) return error(res, 410, 'gone', 'The file was removed after its retention period.');
+      if (state.failAttachments > 0) {
+        state.failAttachments -= 1;
+        req.socket.destroy();
+        return;
+      }
+      let bytes = file.bytes;
+      if (file.corrupt > 0) {
+        file.corrupt -= 1;
+        bytes = Buffer.from(bytes);
+        bytes[0] = bytes[0] ^ 0xff; // same length, wrong content
+      }
+      res.writeHead(200, { 'content-type': file.media_type, 'content-length': bytes.length, 'x-content-type-options': 'nosniff' });
+      return void res.end(bytes);
+    }
+
     const mq = /^\/v1\/questions\/([^/]+)(\/receipt)?$/.exec(p);
     if (mq) {
       const q = state.questions.get(decodeURIComponent(mq[1]));
@@ -544,6 +588,32 @@ export async function startStubHub(opts = {}) {
     decideOnboarding(d) {
       ob.decision = d;
       decide();
+    },
+    /**
+     * The answerer pressed Send on an AI draft (contract changes 5 and 6).
+     * `draft.attachments`: [{ kind: 'diagram'|'image', filename, media_type, bytes: Buffer, title?, mermaid?, gone?, corrupt?: number }]
+     * @param {string} id @param {any} draft @param {string} [by]
+     */
+    answerDraft(id, draft, by) {
+      const q = state.questions.get(id);
+      if (!q) throw new Error(`stub: no question ${id}`);
+      const attachments = (draft.attachments ?? []).map((a) => {
+        const att = {
+          id: `fl_${randomUUID().replace(/-/g, '').slice(0, 20)}`, kind: a.kind, filename: a.filename, media_type: a.media_type,
+          bytes: a.bytes.length, sha256: createHash('sha256').update(a.bytes).digest('hex'), title: a.title ?? '',
+          ...(a.kind === 'diagram' ? { mermaid: a.mermaid ?? '' } : {}),
+        };
+        state.files.set(`${id}|${att.id}`, { bytes: a.bytes, media_type: a.media_type, gone: !!a.gone, corrupt: a.corrupt ?? 0 });
+        return att;
+      });
+      setQ(q, {
+        status: 'answered',
+        answer: {
+          text: draftText(draft), option_id: null, answered_by: by ?? q.answerer ?? q.owner, answered_at: new Date().toISOString(), via: 'draft',
+          format: 'markdown', scripts: draft.scripts ?? [], diagrams: draft.diagrams ?? [], sources: draft.sources ?? [], caveats: draft.caveats ?? [], attachments,
+        },
+      });
+      return attachments;
     },
     /** Mark a question failed. */
     fail(id, message = 'card could not be posted') {

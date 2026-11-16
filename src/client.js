@@ -3,7 +3,7 @@
 // the MCP server: create (idempotent, retried), long-poll wait, receipt.
 import os from 'node:os';
 import fs from 'node:fs';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 
 export const VERSION = JSON.parse(
   fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
@@ -37,6 +37,18 @@ export class HubUnreachable extends Error {}
 /** A wait was cancelled (Ctrl-C, MCP cancellation). */
 export class Aborted extends Error {}
 
+/** An attachment could not be downloaded or did not verify. `final` = retrying cannot help. */
+export class AttachmentError extends Error {
+  /** @param {string} message @param {boolean} [final] */
+  constructor(message, final = false) {
+    super(message);
+    this.final = final;
+  }
+}
+
+/** The most an attachment may be (the hub allows 10 MB per file). */
+export const MAX_ATTACHMENT_BYTES = 11 * 1024 * 1024;
+
 /** @param {number} ms @param {AbortSignal} [signal] */
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
@@ -55,7 +67,7 @@ function sleep(ms, signal) {
 
 /**
  * @param {{ hubUrl: string, via: 'cli'|'mcp', log?: (msg: string) => void, fetchImpl?: typeof fetch,
- *           retryDelaysMs?: number[], maxBackoffMs?: number, tools?: string[] }} opts
+ *           retryDelaysMs?: number[], maxBackoffMs?: number, tools?: string[], attachmentRetryMs?: number }} opts
  */
 export function createClient(opts) {
   const base = opts.hubUrl.replace(/\/+$/, '');
@@ -169,6 +181,55 @@ export function createClient(opts) {
         () => request('POST', `/v1/questions/${encodeURIComponent(id)}/receipt`, { delivered_via: opts.via }),
         'sending receipt',
       ).then((r) => r.data),
+
+    /**
+     * Download one attachment of an answer (contract change 6) and verify its
+     * size and sha256. A transient failure or a mismatch is retried once; 404,
+     * 410 and 403 are final. Never throws anything but AttachmentError.
+     * @param {string} questionId
+     * @param {{ id: string, bytes: number, sha256: string, filename?: string }} att
+     * @returns {Promise<Buffer>}
+     */
+    async downloadAttachment(questionId, att) {
+      const url = `${base}/v1/questions/${encodeURIComponent(questionId)}/attachments/${encodeURIComponent(att.id)}`;
+      let last = new AttachmentError('not downloaded');
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (attempt > 0) await sleep(opts.attachmentRetryMs ?? 500);
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 60_000);
+        try {
+          const res = await doFetch(url, { method: 'GET', signal: ctrl.signal });
+          if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            let code = '';
+            try {
+              code = JSON.parse(text)?.error?.code ?? '';
+            } catch {}
+            if (res.status === 410) throw new AttachmentError('the hub no longer keeps this file (removed after its retention period)', true);
+            if (res.status === 404 || res.status === 403) throw new AttachmentError(`the hub does not have this file for you (${code || res.status})`, true);
+            throw new AttachmentError(`the hub answered ${res.status}${code ? ` ${code}` : ''}`);
+          }
+          const declared = Number(res.headers.get('content-length'));
+          if (Number.isFinite(declared) && declared > MAX_ATTACHMENT_BYTES) throw new AttachmentError(`the file is larger than ${MAX_ATTACHMENT_BYTES} bytes`, true);
+          const buf = Buffer.from(await res.arrayBuffer());
+          if (buf.length !== att.bytes) throw new AttachmentError(`size ${buf.length} does not match the announced ${att.bytes} bytes`);
+          const sha = createHash('sha256').update(buf).digest('hex');
+          if (sha !== String(att.sha256).toLowerCase()) throw new AttachmentError('sha256 does not match: the file was damaged or altered in transit; not used');
+          return buf;
+        } catch (e) {
+          if (e instanceof AttachmentError) {
+            last = e;
+            if (e.final) throw e;
+          } else {
+            const cause = /** @type {any} */ (e).cause;
+            last = new AttachmentError(`cannot reach the hub: ${cause?.code || cause?.message || /** @type {Error} */ (e).message}`);
+          }
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+      throw last;
+    },
 
     /** @param {'pending'|'answered'|'all'} status */
     list: (status) =>
@@ -325,17 +386,25 @@ export function formatComments(q) {
 }
 
 /**
+ * The first line of an answer: who answered and which question.
+ * @param {any} q
+ */
+export function answerHead(q) {
+  const by = q.answer?.answered_by ?? q.answerer ?? q.owner ?? 'owner';
+  let where;
+  if (q.route === 'mentor') where = `your mentor${q.project ? `, project ${q.project}` : ''}, ${q.id}`;
+  else where = q.project != null || !('route' in q) ? `project ${q.project}, ${q.id}` : q.id;
+  return `ANSWER from ${by} (${where}):`;
+}
+
+/**
  * The human-readable answer: the header line, the answer text and, when the
  * hub sent any, the comments block. Without route/comments (an older hub, or
  * an owner question with no comments) this is exactly the brief 02 output.
  * @param {any} q
  */
 export function formatAnswer(q) {
-  const by = q.answer?.answered_by ?? q.answerer ?? q.owner ?? 'owner';
-  let where;
-  if (q.route === 'mentor') where = `your mentor${q.project ? `, project ${q.project}` : ''}, ${q.id}`;
-  else where = q.project != null || !('route' in q) ? `project ${q.project}, ${q.id}` : q.id;
-  const head = `ANSWER from ${by} (${where}):\n${q.answer?.text ?? ''}`;
+  const head = `${answerHead(q)}\n${q.answer?.text ?? ''}`;
   const comments = formatComments(q);
   return comments ? `${head}\n\n${comments}` : head;
 }

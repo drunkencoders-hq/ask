@@ -17,11 +17,12 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/paths.test.js test/cli.test.js test/mcp.test.js test/mentor.test.js test/assistants.test.js test/setup.test.js test/onboarding.test.js test/nodeversion.test.js test/bootstrap-sh.test.js",
+    "test": "node --test --test-concurrency=1 test/paths.test.js test/cli.test.js test/mcp.test.js test/mentor.test.js test/assistants.test.js test/setup.test.js test/onboarding.test.js test/nodeversion.test.js test/rich.test.js test/bootstrap-sh.test.js",
     "demo": "node scripts/demo.js",
     "demo:mcp": "node scripts/demo-mcp.js",
     "demo:mentor": "node scripts/demo-mentor.js",
     "demo:slack-start": "node scripts/demo-slack-start.js",
+    "demo:rich": "node scripts/demo-rich.js",
     "rehearse:bootstrap": "node scripts/rehearse-bootstrap.js"
   },
   "dependencies": {

@@ -52,3 +52,12 @@ export async function gitInfo(cwd) {
     branch: branch && branch !== 'HEAD' ? branch : null,
   };
 }
+
+/**
+ * The top folder of the git work tree containing `cwd`, or null outside one.
+ * @param {string} cwd
+ * @returns {Promise<string|null>}
+ */
+export async function gitTop(cwd) {
+  return git(['rev-parse', '--show-toplevel'], cwd);
+}
