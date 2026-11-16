@@ -43,7 +43,23 @@ Tailscale's VPN configuration) and **two sign-ins in your browser**
       one line saying so.
    2. `git` (Homebrew). Apple's `/usr/bin/git` counts only when the Command
       Line Tools are installed, so their install dialog never pops up.
-   3. Node (Homebrew; if missing or older than 20).
+   3. Node, only if it is missing or older than 20: the newest
+      **even-numbered** Node, an LTS line (today Homebrew's `node`, which is
+      Node 26). The team's website starter (Astro) needs an even-numbered
+      Node 22 or newer, and Homebrew's plain `node` formula follows Node's
+      newest release, which is an odd-numbered, short-lived line for half of
+      every year. When `node` is itself odd, the script installs the newest
+      `node@<even>` formula that exists and links it into Homebrew's `bin`
+      (already first on your `PATH`; no shell profile is edited). If
+      Homebrew cannot be asked or no such formula exists, it uses the pinned
+      fallback **`node@24`** (a constant at the top of `bootstrap.sh`, also in
+      `src/setup/nodeversion.js`). A Node you already have (20 or newer) is
+      never replaced, unlinked or reordered: if it is odd-numbered or older
+      than 22 you get one warning with the command that installs a suitable
+      one (naming nvm, fnm, asdf or Volta when one supplies it), and the
+      set-up carries on. `ask doctor` shows the same warning, and
+      `ask doctor --json` carries it as `level: "warn"`; it does not change
+      its exit code.
    4. `gh`, the GitHub CLI (Homebrew).
    5. The Tailscale app (`tailscale-app` cask; macOS asks for your password
       and, on first start, to allow a VPN configuration).
@@ -116,6 +132,10 @@ or the step file), never printed, and not passed on to any other program.
    prompt for installers that need it; the script says so first. If a new
    tool is not visible yet, it asks you to open a new PowerShell window
    and paste the same command again.
+   (`OpenJS.NodeJS.LTS` is already an even-numbered LTS line.) A Node you
+   already have is never replaced; if it is odd-numbered or older than 22 the
+   script prints the same one-line warning as `ask doctor`, with
+   `winget install --id OpenJS.NodeJS.LTS --exact`.
 4. Installs or updates `ask` with `npm.cmd install -g`.
 5. Runs `ask setup --hub <hub_url>`, with `-Token`/`-Share` passed to it
    through its environment (same steps as on macOS; Tailscale sign-in may
@@ -152,6 +172,7 @@ ask setup --hub <url> --token <t> [--share <link>] [--no-first-question]
                          in Slack, then `ready` and a first test question
 ask setup --unregister   remove the MCP entries and the config file
 ask doctor               read-only checks, one line each; non-zero if any fail
+                         (`--json`: the same as one JSON object; a warning has "level": "warn")
 ask standby              standby test through the hub; prints "Standby verified: <you> via <hub>"
 ```
 

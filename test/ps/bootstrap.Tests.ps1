@@ -185,3 +185,28 @@ Describe 'set-up token and share link (brief 04b)' {
         ($script:lines -join "`n") | Should -Match 'FAILED: -Share must be an https:// link'
     }
 }
+
+Describe 'Node for the website starter (brief 04c)' {
+    BeforeEach {
+        $script:lines = [System.Collections.Generic.List[string]]::new()
+        Mock Write-Host { param($Object) $script:lines.Add([string]$Object) }
+        Mock Get-NodeVersion { param($Major) "v$Major.11.1" }
+    }
+
+    It 'warns once for an odd-numbered Node and names the winget command; replaces nothing' {
+        (Write-StarterNodeWarning 23) | Should -BeTrue
+        $script:lines.Count | Should -Be 1
+        $script:lines[0] | Should -Match '^warn Node v23\.11\.1 works for `ask`, but the website starter needs an even-numbered Node 22 or newer\.'
+        $script:lines[0] | Should -Match 'winget install --id OpenJS\.NodeJS\.LTS --exact'
+    }
+
+    It 'warns for an even Node older than 22' {
+        (Write-StarterNodeWarning 20) | Should -BeTrue
+    }
+
+    It 'is silent for an even Node of 22 or newer' {
+        (Write-StarterNodeWarning 22) | Should -BeFalse
+        (Write-StarterNodeWarning 24) | Should -BeFalse
+        $script:lines.Count | Should -Be 0
+    }
+}

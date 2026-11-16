@@ -22,6 +22,12 @@ set -u
 ORG="drunkencoders-hq"
 ASK_SOURCE="${ASK_INSTALL_SOURCE:-git+https://github.com/${ORG}/ask.git}"
 NODE_MIN_MAJOR=20
+# The website starter (Astro) needs an even-numbered Node of at least this major.
+STARTER_NODE_MIN_MAJOR=22
+# Pinned fallback Homebrew formula when the newest even-numbered one cannot be
+# derived (offline, or a formula that does not exist yet). Listed in the README;
+# src/setup/nodeversion.js has the same value and a test keeps them equal.
+NODE_FALLBACK_FORMULA="node@24"
 HOMEBREW_INSTALLER="https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh"
 # Where to look for things outside PATH (overridable only for the rehearsal).
 BREW_PATHS="${DC_BREW_PATHS:-/opt/homebrew/bin/brew /usr/local/bin/brew}"
@@ -209,24 +215,115 @@ node_major() {
   printf '%s\n' "${v%%.*}"
 }
 
+# Even-numbered and at least STARTER_NODE_MIN_MAJOR: what the website starter needs.
+suits_starter() {
+  [ "$1" -ge "$STARTER_NODE_MIN_MAJOR" ] && [ $(($1 % 2)) -eq 0 ]
+}
+
+# Which version manager supplies this node, from its path (never touched).
+node_manager() {
+  case "$(command -v node 2>/dev/null)" in
+    */.nvm/*) echo nvm ;;
+    */fnm/* | */fnm_multishells/* | */.fnm/*) echo fnm ;;
+    */.asdf/*) echo asdf ;;
+    */.volta/* | */Volta/*) echo Volta ;;
+  esac
+}
+
+# One warning for a Node that is fine for ask but not for the starter. Same
+# wording as `ask doctor`. The existing Node is never replaced or unlinked.
+warn_starter_node() {
+  local ver="$1" manager how major lead
+  manager="$(node_manager)"
+  major="${NODE_FALLBACK_FORMULA#node@}"
+  case "$manager" in
+    nvm) how="nvm install $major && nvm alias default $major" ;;
+    fnm) how="fnm install $major && fnm default $major" ;;
+    asdf) how="asdf install nodejs latest:$major && asdf set -u nodejs latest:$major" ;;
+    Volta) how="volta install node@$major" ;;
+    *) how="brew install $NODE_FALLBACK_FORMULA && brew link --overwrite --force $NODE_FALLBACK_FORMULA" ;;
+  esac
+  if [ -n "$manager" ]; then lead="$manager supplies this Node; to switch"; else lead="To install one"; fi
+  say "warn Node $ver works for \`ask\`, but the website starter needs an even-numbered Node $STARTER_NODE_MIN_MAJOR or newer. $lead (your current Node is left as it is): $how"
+}
+
+# The major of Homebrew's plain `node` formula (it follows Node's newest release).
+brew_plain_node_major() {
+  local v
+  v="$(brew info --formula --json=v2 node 2>/dev/null | grep -o '"stable":"[0-9][0-9.]*"' | head -n 1 | cut -d'"' -f4)"
+  [ -n "$v" ] || return 1
+  printf '%s\n' "${v%%.*}"
+}
+
+# The Homebrew formulas to try for an even-numbered Node, newest first, ending
+# with the pinned fallback: plain `node` when it is itself even and new enough,
+# otherwise node@<even> below it, down to STARTER_NODE_MIN_MAJOR.
+node_formula_candidates() {
+  local m e
+  if m="$(brew_plain_node_major)"; then
+    if suits_starter "$m"; then
+      echo node
+    else
+      e=$(((m - 1) / 2 * 2))
+      while [ "$e" -ge "$STARTER_NODE_MIN_MAJOR" ]; do
+        echo "node@$e"
+        e=$((e - 2))
+      done
+    fi
+  else
+    say "     Could not ask Homebrew which Node is newest; using the pinned $NODE_FALLBACK_FORMULA." >&2
+  fi
+  echo "$NODE_FALLBACK_FORMULA"
+}
+
+# Install the newest even-numbered Node and make it the node (and npm) found
+# first. A versioned formula is keg-only, so it is linked into Homebrew's bin,
+# which is already first on PATH: no shell profile is edited.
+install_even_node() {
+  local f
+  for f in $(node_formula_candidates); do
+    if ! brew info --formula "$f" >/dev/null 2>&1; then
+      say "     Homebrew has no formula $f (yet); trying the next one."
+      continue
+    fi
+    if [ "$DRY_RUN" -eq 1 ]; then
+      if [ "$f" = node ]; then plan "brew install node"; else plan "brew install $f && brew link --overwrite --force $f"; fi
+      return 0
+    fi
+    say "  running: brew install $f"
+    if brew install "$f" && { [ "$f" = node ] || brew link --overwrite --force "$f"; }; then
+      return 0
+    fi
+    say "     Installing $f did not work; trying the next one."
+  done
+  return 1
+}
+
 ensure_node() {
   local major
   if major="$(node_major)" && [ "$major" -ge "$NODE_MIN_MAJOR" ]; then
     say "ok   Node $(node --version)"
-    report node skipped "already installed"
+    if suits_starter "$major"; then
+      report node skipped "already installed"
+    else
+      warn_starter_node "$(node --version)"
+      report node skipped "already installed ($(node --version); website starter needs even 22+)"
+    fi
     return 0
   fi
   if [ -n "${major:-}" ]; then
-    say "--   Node $(node --version) is older than $NODE_MIN_MAJOR; installing a current Node with Homebrew."
+    say "--   Node $(node --version) is older than $NODE_MIN_MAJOR; installing the newest even-numbered Node with Homebrew."
   else
-    say "--   Node is not installed."
+    say "--   Node is not installed; installing the newest even-numbered Node (an LTS line) with Homebrew."
   fi
-  install node brew install node || fail "could not install Node with Homebrew. Run 'brew doctor', fix what it reports, then paste the same command again."
-  if [ "$DRY_RUN" -eq 0 ]; then
-    hash -r
-    major="$(node_major)" || major=0
-    [ "$major" -ge "$NODE_MIN_MAJOR" ] || fail "Node is still older than $NODE_MIN_MAJOR (another Node earlier on your PATH?). Run 'which -a node', remove the old one or put $(brew --prefix)/bin first, then paste the same command again."
+  if [ "$DRY_RUN" -eq 1 ]; then
+    install node install_even_node || fail "could not plan the Node install."
+    return 0
   fi
+  install node install_even_node || fail "could not install Node with Homebrew. Run 'brew doctor', fix what it reports, then paste the same command again."
+  hash -r
+  major="$(node_major)" || major=0
+  suits_starter "$major" || fail "Node $(node --version 2>/dev/null) is first on your PATH, not the even-numbered one just installed. Run 'which -a node', put $(brew --prefix)/bin first, then paste the same command again."
 }
 
 ensure_gh() {
@@ -272,6 +369,7 @@ ensure_ask() {
   if [ "$DRY_RUN" -eq 0 ]; then
     hash -r
     command -v ask >/dev/null 2>&1 || fail "ask was installed but is not on your PATH ($(npm prefix -g)/bin). Open a new Terminal window and paste the same command again."
+    ask --version >/dev/null 2>&1 || fail "ask was installed but does not start under $(command -v node) ($(node --version 2>/dev/null)). Run 'which -a node', then paste the same command again."
   fi
 }
 

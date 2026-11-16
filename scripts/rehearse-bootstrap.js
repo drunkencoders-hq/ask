@@ -27,7 +27,7 @@ const TOKEN = 'tok_REHEARSAL_d41d8cd98f00b204e9800998ecf8427e';
 const SHARE = 'https://login.tailscale.com/admin/invite/REHEARSALSHARE';
 
 // The system tools bootstrap.sh itself needs; nothing else of this Mac is on PATH.
-const SYSTEM_TOOLS = ['uname', 'id', 'awk', 'head', 'mktemp', 'rm', 'date', 'cat', 'sed', 'tr', 'dirname', 'basename', 'env', 'sleep', 'mkdir', 'chmod', 'ln', 'cp', 'bash', 'sh', 'ls', 'grep'];
+const SYSTEM_TOOLS = ['uname', 'id', 'awk', 'head', 'mktemp', 'rm', 'date', 'cat', 'sed', 'tr', 'dirname', 'basename', 'env', 'sleep', 'mkdir', 'chmod', 'ln', 'cp', 'bash', 'sh', 'ls', 'grep', 'cut'];
 
 /** Bash stubs for the installers; each logs its arguments. */
 function bashStubs(dir, catalog, prefix, appsDir) {
@@ -38,29 +38,56 @@ function bashStubs(dir, catalog, prefix, appsDir) {
   *Homebrew/install*) printf '%s\\n' '[ "\${NONINTERACTIVE:-}" = 1 ] || { echo "installer would ask questions" >&2; exit 9; }' 'mkdir -p "${prefix}/bin" && cp "${catalog}/brew" "${prefix}/bin/brew"' ;;
   *) echo "stub curl: no network" >&2; exit 22 ;;
 esac\n`,
-    brew: `${head}P="${prefix}"
+    brew: head + [
+      'P="' + prefix + '"',
+      'case "$1" in',
+      '  shellenv) printf \'export PATH="%s/bin:$PATH"\\n\' "$P" ;;',
+      '  --prefix) printf \'%s\\n\' "$P" ;;',
+      // STUB_BREW_NODE: the version of Homebrew's plain node formula (default 26.13.1).
+      // STUB_BREW_FORMULAS: the Node formulas that exist. STUB_BREW_OFFLINE=1: the JSON query fails.
+      '  info)',
+      '    shift',
+      '    if [ "$1" = --formula ] && [ "$2" = --json=v2 ]; then',
+      '      [ "${STUB_BREW_OFFLINE:-}" = 1 ] && exit 1',
+      '      printf \'{"formulae":[{"name":"node","versions":{"stable":"%s"}}]}\\n\' "${STUB_BREW_NODE:-26.13.1}"',
+      '      exit 0',
+      '    fi',
+      '    [ "$1" = --formula ] && shift',
+      '    case " ${STUB_BREW_FORMULAS:-node node@22 node@24} " in *" $1 "*) exit 0 ;; esac',
+      '    exit 1 ;;',
+      '  link)',
+      '    shift',
+      '    F="$3"',
+      '    [ -d "$P/opt/$F/bin" ] || exit 1',
+      '    cp "$P/opt/$F/bin/"* "$P/bin/" ;;',
+      '  install)',
+      '    shift',
+      '    if [ "$1" = --cask ]; then',
+      '      case "$2" in',
+      '        tailscale-app) mkdir -p "' + appsDir + '/Tailscale.app" && cp "' + catalog + '/tailscale" "' + catalog + '/tailscale.mjs" "$P/bin/" ;;',
+      '        claude-code) cp "' + catalog + '/claude" "' + catalog + '/claude.mjs" "$P/bin/" ;;',
+      '        *) exit 1 ;;',
+      '      esac',
+      '    else',
+      '      case "$1" in',
+      '        node | node@*)',
+      '          case "$1" in node) V="${STUB_BREW_NODE:-26.13.1}" ;; *) V="${1#node@}.99.9" ;; esac',
+      '          D="$P/bin"; [ "$1" = node ] || D="$P/opt/$1/bin"',
+      '          mkdir -p "$D"',
+      '          printf \'#!/bin/bash\\n[ "$1" = --version ] && { echo v%s; exit 0; }\\nexec "%s" "$@"\\n\' "$V" "' + process.execPath + '" >"$D/node"',
+      '          chmod +x "$D/node"',
+      '          cp "' + catalog + '/npm" "$D/npm" ;;',
+      '        git) cp "' + catalog + '/git" "$P/bin/git" ;;',
+      '        gh) cp "' + catalog + '/gh" "' + catalog + '/gh.mjs" "$P/bin/" ;;',
+      '        *) exit 1 ;;',
+      '      esac',
+      '    fi ;;',
+      '  *) exit 1 ;;',
+      'esac',
+      '',
+    ].join('\n'),
+    npm: `${head}printf '%s\\n' "npm runs under node $(node --version)" >>"$STUB_LOG"
 case "$1" in
-  shellenv) printf 'export PATH="%s/bin:$PATH"\\n' "$P" ;;
-  --prefix) printf '%s\\n' "$P" ;;
-  install)
-    shift
-    if [ "$1" = --cask ]; then
-      case "$2" in
-        tailscale-app) mkdir -p "${appsDir}/Tailscale.app" && cp "${catalog}/tailscale" "${catalog}/tailscale.mjs" "$P/bin/" ;;
-        claude-code) cp "${catalog}/claude" "${catalog}/claude.mjs" "$P/bin/" ;;
-        *) exit 1 ;;
-      esac
-    else
-      case "$1" in
-        node) ln -sf "${process.execPath}" "$P/bin/node" ;;
-        git) cp "${catalog}/git" "$P/bin/git" ;;
-        gh) cp "${catalog}/gh" "${catalog}/gh.mjs" "$P/bin/" ;;
-        *) exit 1 ;;
-      esac
-    fi ;;
-  *) exit 1 ;;
-esac\n`,
-    npm: `${head}case "$1" in
   prefix) printf '%s\\n' "${prefix}" ;;
   install) printf '#!/bin/bash\\nexec node %q/src/cli.js "$@"\\n' "$3" >"${prefix}/bin/ask"; chmod +x "${prefix}/bin/ask" ;;
   *) exit 1 ;;
@@ -79,7 +106,9 @@ exit 0\n`,
 /**
  * @param {string} name
  * @param {{ installed?: boolean, decision?: 'register'|'refuse'|'expire', unreachable?: boolean, failProgress?: number,
- *           sudo?: 'refused'|'nonadmin', throttle?: Record<string, number>, repaste?: boolean, tokenDead?: boolean }} sc
+ *           sudo?: 'refused'|'nonadmin', throttle?: Record<string, number>, repaste?: boolean, tokenDead?: boolean,
+ *           nodeVersion?: string, brewNode?: string, brewFormulas?: string, brewOffline?: boolean,
+ *           expectFormula?: string, expectWarn?: boolean }} sc
  */
 async function rehearse(name, sc) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ask-rehearsal-'));
@@ -117,13 +146,11 @@ async function rehearse(name, sc) {
     for (const f of ['brew', 'git', 'npm']) fs.copyFileSync(path.join(catalog, f), path.join(prefix, 'bin', f));
     for (const f of ['gh', 'tailscale', 'claude']) for (const e of ['', '.mjs']) fs.copyFileSync(path.join(catalog, f + e), path.join(prefix, 'bin', f + e));
     fs.chmodSync(path.join(prefix, 'bin', 'brew'), 0o755);
-    fs.symlinkSync(process.execPath, path.join(prefix, 'bin', 'node'));
+    // The node already on this Mac: reports sc.nodeVersion, runs the real node.
+    fs.writeFileSync(path.join(prefix, 'bin', 'node'), `#!/bin/bash\n[ "$1" = --version ] && { echo ${sc.nodeVersion ?? 'v24.22.3'}; exit 0; }\nexec "${process.execPath}" "$@"\n`, { mode: 0o755 });
     fs.mkdirSync(path.join(appsDir, 'Tailscale.app'));
     fs.writeFileSync(path.join(prefix, 'bin', 'ask'), `#!/bin/bash\nexec node ${JSON.stringify(ROOT)}/src/cli.js "$@"\n`, { mode: 0o755 });
   }
-  // `brew install node` also provides npm.
-  const brewFile = path.join(catalog, 'brew');
-  fs.writeFileSync(brewFile, fs.readFileSync(brewFile, 'utf8').replace(`node) ln -sf "${process.execPath}" "$P/bin/node" ;;`, `node) ln -sf "${process.execPath}" "$P/bin/node" && cp "${catalog}/npm" "$P/bin/npm" ;;`));
 
   const shareAccepted = () => fs.existsSync(path.join(stateDir, 'share_accepted'));
   const hub = await startStubHub({
@@ -151,6 +178,9 @@ async function rehearse(name, sc) {
     DC_APPS_DIR: appsDir,
     STUB_LOG: log,
     STUB_SUDO: sc.sudo === 'refused' ? 'refused' : 'ok',
+    ...(sc.brewNode ? { STUB_BREW_NODE: sc.brewNode } : {}),
+    ...(sc.brewFormulas ? { STUB_BREW_FORMULAS: sc.brewFormulas } : {}),
+    ...(sc.brewOffline ? { STUB_BREW_OFFLINE: '1' } : {}),
     STUB_STATE_DIR: stateDir,
     STUB_SHARE_URL: SHARE,
     STUB_GH: sc.installed ? 'ok' : 'signed_out',
@@ -237,8 +267,25 @@ async function rehearse(name, sc) {
     const skippedExpected = sc.installed ? ['homebrew', 'git', 'node', 'gh', 'tailscale', 'ask', 'assistant', 'github-sign-in', 'tailscale-sign-in'] : [];
     for (const s of skippedExpected) if (finals.get(s) !== 'skipped') problems.push(`${s} reported ${finals.get(s)}, expected skipped`);
     if (sc.installed && installs.length) problems.push(`installs: ${installs.join('; ')}`);
+    // Node for the website starter (brief 04c): the formula installed is even-numbered, linked when keg-only,
+    // and is the node first on PATH when npm installs ask; an existing Node is never replaced.
+    const warnCount = (out.match(/^warn Node /gm) ?? []).length;
+    if (warnCount !== (sc.expectWarn ? 1 : 0)) problems.push(`${warnCount} Node warning(s), expected ${sc.expectWarn ? 1 : 0}`);
+    if (sc.installed && /^brew (install node|link)/m.test(stubLog)) problems.push('an existing Node was replaced or relinked');
+    if (!sc.installed) {
+      const f = sc.expectFormula ?? 'node';
+      if (!new RegExp(`^brew install ${f.replace('@', '@')}$`, 'm').test(stubLog)) problems.push(`formula ${f} not installed`);
+      if (f !== 'node' && !new RegExp(`^brew link --overwrite --force ${f}$`, 'm').test(stubLog)) problems.push(`${f} not linked`);
+      if (/^brew install node@?\d*$/m.test(stubLog) && (stubLog.match(/^brew install node/gm) ?? []).length !== 1) problems.push('more than one Node formula installed');
+      const nv = /^npm runs under node v(\d+)\./m.exec(stubLog);
+      if (!nv || Number(nv[1]) % 2 !== 0 || Number(nv[1]) < 22) problems.push(`npm ran under ${nv ? 'v' + nv[1] : 'no node'}, not an even Node >= 22`);
+    }
     if (!sc.installed && !sc.failProgress && installs.length !== 7) problems.push(`expected 7 installs, saw ${installs.length}: ${installs.join('; ')}`);
     summary = `BOOTSTRAP OK: ${installs.length} installs, ${questions} questions asked, ${finals.size} steps reported in order, registered after approval, standby verified, first question sent`;
+    if (sc.expectFormula || sc.nodeVersion) {
+      const how = sc.installed ? `existing Node ${sc.nodeVersion} left alone, ${sc.expectWarn ? 'one warning' : 'no warning'}` : `brew install ${sc.expectFormula ?? 'node'}${sc.expectFormula && sc.expectFormula !== 'node' ? ' + brew link' : ''}, even Node first on PATH under npm`;
+      summary = `REHEARSAL ${name} OK: ${how}; set-up completed: exit ${code}, registered, standby verified, first question sent`;
+    }
     if (sc.throttle) summary = `REHEARSAL ${name} OK: ${ob.throttled.length} calls answered 429 with Retry-After (${ob.throttled.join(', ')}); waited and completed: exit ${code}, ${finals.size} steps reported, registered, standby verified, ready reported`;
     if (sc.failProgress) summary = `REHEARSAL ${name} OK: ${sc.failProgress} progress reports refused by the hub (lost: ${missing.join(', ') || 'none'}), set-up still completed: exit ${code}, registered, standby verified, ready reported, first question sent`;
   } else if (sc.decision) {
@@ -270,6 +317,11 @@ const SCENARIOS = {
   'rate-limited': { installed: true, throttle: { hello: 1, identity: 1, status: 1, progress: 2 } },
   repaste: { installed: true, repaste: true },
   'repaste-dead': { installed: true, repaste: true, tokenDead: true },
+  'node-23': { installed: true, nodeVersion: 'v23.11.1', expectWarn: true },
+  'node-22': { installed: true, nodeVersion: 'v22.23.5' },
+  'node-odd-formula': { brewNode: '27.0.0', brewFormulas: 'node node@22 node@24', expectFormula: 'node@24' },
+  'node-newest-missing': { brewNode: '29.0.0', brewFormulas: 'node node@22 node@24', expectFormula: 'node@24' },
+  'node-fallback': { brewOffline: true, expectFormula: 'node@24' },
   'sudo-refused': { sudo: /** @type {const} */ ('refused') },
   'non-admin': { sudo: /** @type {const} */ ('nonadmin') },
 };

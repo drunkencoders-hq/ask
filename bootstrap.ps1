@@ -24,6 +24,8 @@ Set-StrictMode -Version 2.0
 
 $Org = 'drunkencoders-hq'
 $NodeMinMajor = 20
+# The website starter (Astro) needs an even-numbered Node of at least this major.
+$StarterNodeMinMajor = 22
 
 # winget package IDs, checked against microsoft/winget-pkgs (manifests/<letter>/...).
 $WingetIds = @{
@@ -124,6 +126,31 @@ function Get-NodeMajor {
     return $null
 }
 
+function Get-NodeVersion([int]$Major) {
+    # Full version for the warning; falls back to the major when node cannot be asked.
+    try {
+        $node = Find-Tool 'node.exe'
+        if ($node) {
+            $v = (& $node --version 2>$null | Select-Object -First 1)
+            if ($v -match '^v\d+\.\d+') { return [string]$v }
+        }
+    }
+    catch {
+        Write-Verbose 'node --version did not answer'
+    }
+    return "v$Major"
+}
+
+# One warning for a Node that is fine for ask but not for the website starter.
+# Same wording as `ask doctor`. The existing Node is never replaced.
+function Write-StarterNodeWarning([int]$Major) {
+    $even = ($Major % 2) -eq 0
+    if ($even -and $Major -ge $StarterNodeMinMajor) { return $false }
+    $v = Get-NodeVersion $Major
+    Write-Host ("warn Node $v works for ``ask``, but the website starter needs an even-numbered Node $StarterNodeMinMajor or newer. To install one (your current Node is left as it is): winget install --id " + $WingetIds.Node + ' --exact')
+    return $true
+}
+
 function Assert-Winget {
     if (-not (Find-Tool 'winget.exe')) {
         Stop-Bootstrap 'winget is missing. Install "App Installer" from the Microsoft Store (https://apps.microsoft.com/detail/9NBLGGH4NNS1), then paste the same command again.'
@@ -166,7 +193,12 @@ function Confirm-Node {
     $major = Get-NodeMajor
     if ($null -ne $major -and $major -ge $NodeMinMajor) {
         Write-Step "ok   Node v$major"
-        Add-Report 'node' 'skipped' 'already installed'
+        if (Write-StarterNodeWarning $major) {
+            Add-Report 'node' 'skipped' "already installed (v$major; website starter needs even 22+)"
+        }
+        else {
+            Add-Report 'node' 'skipped' 'already installed'
+        }
         return
     }
     if ($null -ne $major) { Write-Step "--   Node v$major is older than $NodeMinMajor." } else { Write-Step '--   Node is not installed.' }

@@ -47,8 +47,8 @@ test('bootstrap.sh rejects a --share that is not an https link', { skip }, () =>
   assert.match(r.stderr, /bootstrap: FAILED: --share must be an https:\/\/ link/);
 });
 
-test('rehearsal: bootstrap.sh piped like curl|bash, stubs only — all scenarios', { skip, timeout: 240_000 }, () => {
-  const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'rehearse-bootstrap.js'), 'all'], { encoding: 'utf8', timeout: 230_000 });
+test('rehearsal: bootstrap.sh piped like curl|bash, stubs only — all scenarios', { skip, timeout: 400_000 }, () => {
+  const r = spawnSync(process.execPath, [path.join(ROOT, 'scripts', 'rehearse-bootstrap.js'), 'all'], { encoding: 'utf8', timeout: 390_000 });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const lines = r.stdout.trim().split('\n');
   assert.deepEqual(lines.slice(0, 2), [
@@ -56,5 +56,5 @@ test('rehearsal: bootstrap.sh piped like curl|bash, stubs only — all scenarios
     'BOOTSTRAP OK: 0 installs, 0 questions asked, 15 steps reported in order, registered after approval, standby verified, first question sent',
   ]);
   const ok = lines.filter((l) => /^REHEARSAL \S+ OK:/.test(l)).map((l) => l.split(' ')[1]);
-  assert.deepEqual(ok, ['refused', 'expired', 'unreachable', 'progress-fail', 'rate-limited', 'repaste', 'repaste-dead', 'sudo-refused', 'non-admin'], r.stdout);
+  assert.deepEqual(ok, ['refused', 'expired', 'unreachable', 'progress-fail', 'rate-limited', 'repaste', 'repaste-dead', 'node-23', 'node-22', 'node-odd-formula', 'node-newest-missing', 'node-fallback', 'sudo-refused', 'non-admin'], r.stdout);
 });

@@ -192,8 +192,9 @@ export async function main(argv) {
     const { realSys } = await import('./setup/sys.js');
     const sys = realSys();
     if (sub === 'setup') return (await import('./setup/setup.js')).runSetup(sys, argv.slice(1));
+    if (sub === 'doctor' && argv.length === 2 && argv[1] === '--json') return (await import('./setup/doctor.js')).runDoctor(sys, { json: true });
     if (argv.length > 1) {
-      err(`ask ${sub} takes no arguments`);
+      err(`ask ${sub} takes no arguments${sub === 'doctor' ? ' except --json' : ''}`);
       return EXIT.USAGE;
     }
     if (sub === 'doctor') return (await import('./setup/doctor.js')).runDoctor(sys);
