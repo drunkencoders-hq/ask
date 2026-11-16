@@ -28,7 +28,6 @@ export const EXIT = {
   UNREACHABLE: 4,
   REFUSED: 5,
   FAILED: 6,
-  NOT_IMPLEMENTED: 64,
   INTERRUPTED: 130,
 };
 
@@ -43,11 +42,14 @@ Usage:
   ask --list          my questions still pending or answered-but-undelivered
   ask mcp             run the MCP server on stdio
   ask --version | --help
-  ask setup | doctor | standby     (not implemented yet)
+  ask setup --hub <url>             configure, sign in, register MCP, verify
+  ask setup --unregister            remove MCP entries and the config file
+  ask doctor                        read-only health checks
+  ask standby                       send a standby test through the hub
 
 Exit codes: 0 answered and receipt recorded · 2 configuration or usage error ·
 3 still pending at --timeout · 4 hub unreachable · 5 hub refused ·
-6 question failed on the hub · 64 not implemented yet
+6 question failed on the hub
 `;
 
 class UsageError extends Error {}
@@ -186,8 +188,15 @@ export async function main(argv) {
     return -1; // keep running; the server exits on stdin close
   }
   if (sub === 'setup' || sub === 'doctor' || sub === 'standby') {
-    err(`ask ${sub}: not implemented yet.`);
-    return EXIT.NOT_IMPLEMENTED;
+    const { realSys } = await import('./setup/sys.js');
+    const sys = realSys();
+    if (sub === 'setup') return (await import('./setup/setup.js')).runSetup(sys, argv.slice(1));
+    if (argv.length > 1) {
+      err(`ask ${sub} takes no arguments`);
+      return EXIT.USAGE;
+    }
+    if (sub === 'doctor') return (await import('./setup/doctor.js')).runDoctor(sys);
+    return (await import('./setup/standby.js')).runStandby(sys);
   }
 
   const ac = new AbortController();

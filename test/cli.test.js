@@ -192,11 +192,13 @@ test('not in a git repo and no --repo/--project → exit 2', () =>
     assert.equal(hub.state.questions.size, 0);
   }));
 
-test('bad flags → exit 2; reserved subcommands → exit 64', () =>
+test('bad flags → exit 2 (also for setup/doctor/standby)', () =>
   withHub(async ({ t }) => {
     assert.equal((await runCli(['x', '--bogus'], t).done).code, 2);
     assert.equal((await runCli(['x', '--timeout', 'soon', ...REPO], t).done).code, 2);
-    for (const sub of ['setup', 'doctor', 'standby']) assert.equal((await runCli([sub], t).done).code, 64);
+    assert.equal((await runCli(['setup', '--bogus'], t).done).code, 2);
+    assert.equal((await runCli(['doctor', 'extra'], t).done).code, 2);
+    assert.equal((await runCli(['standby', 'extra'], t).done).code, 2);
   }));
 
 test('hub unreachable → exit 4', async () => {

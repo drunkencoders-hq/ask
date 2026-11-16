@@ -8,13 +8,16 @@
   },
   "files": [
     "src",
-    "README.md"
+    "README.md",
+    "bootstrap.sh",
+    "bootstrap.ps1",
+    "docs"
   ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/paths.test.js test/cli.test.js test/mcp.test.js",
+    "test": "node --test --test-concurrency=1 test/paths.test.js test/cli.test.js test/mcp.test.js test/assistants.test.js test/setup.test.js test/bootstrap-sh.test.js",
     "demo": "node scripts/demo.js",
     "demo:mcp": "node scripts/demo-mcp.js"
   },

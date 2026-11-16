@@ -41,6 +41,8 @@ export async function startStubHub(opts = {}) {
     createBodies: [],
     /** @type {any[]} */
     receiptBodies: [],
+    /** lines the hub would post to #runner */
+    statusPosts: /** @type {string[]} */ ([]),
   };
 
   const notify = () => {
@@ -225,7 +227,14 @@ export async function startStubHub(opts = {}) {
           req.socket.destroy();
           return;
         }
-        if (q.status === 'answered') setQ(q, { status: 'delivered', delivered_at: new Date().toISOString() });
+        if (q.status === 'answered') {
+          setQ(q, { status: 'delivered', delivered_at: new Date().toISOString() });
+          if (q.kind === 'standby_test') {
+            const c = q.body.client ?? {};
+            // What the hub's ChatPort.postStatus would put in #runner (brief 01).
+            state.statusPosts.push(`Standby verified: ${me} on ${c.host} — ask ${c.version}, ${c.os}, tools: ${(c.tools ?? []).join(', ') || 'none'}`);
+          }
+        }
         else if (q.status !== 'delivered') return error(res, 409, 'not_answered', 'The question has not been answered yet.');
         return send(res, 200, { id: q.id, status: 'delivered' });
       }
