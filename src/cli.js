@@ -1,0 +1,325 @@
+#!/usr/bin/env node
+// @ts-check
+// `ask` command line. stdout carries only the answer (or JSON with --json);
+// everything else goes to stderr.
+import fs from 'node:fs';
+import { parseArgs } from 'node:util';
+import { pathToFileURL } from 'node:url';
+import { resolveHubUrl, ConfigError } from './config.js';
+import { PendingStore, pendingFilePath } from './pending.js';
+import { gitInfo } from './gitinfo.js';
+import {
+  VERSION,
+  createClient,
+  submitQuestion,
+  sendReceipt,
+  findResumeTarget,
+  formatAnswer,
+  HubError,
+  HubUnreachable,
+  Aborted,
+  REFUSAL_CODES,
+} from './client.js';
+
+export const EXIT = {
+  OK: 0,
+  USAGE: 2,
+  TIMEOUT: 3,
+  UNREACHABLE: 4,
+  REFUSED: 5,
+  FAILED: 6,
+  NOT_IMPLEMENTED: 64,
+  INTERRUPTED: 130,
+};
+
+const HELP = `ask ${VERSION} — ask the project's owner a question through the drunkencoders hub
+
+Usage:
+  ask "question text" [--repo org/name | --project slug] [--branch name]
+                      [--context-file path | --context -]   (- reads stdin)
+                      [--timeout seconds]   default 0 = wait until answered
+                      [--json]
+  ask --resume [id]   fetch the answer to an earlier question (default: most recent pending)
+  ask --list          my questions still pending or answered-but-undelivered
+  ask mcp             run the MCP server on stdio
+  ask --version | --help
+  ask setup | doctor | standby     (not implemented yet)
+
+Exit codes: 0 answered and receipt recorded · 2 configuration or usage error ·
+3 still pending at --timeout · 4 hub unreachable · 5 hub refused ·
+6 question failed on the hub · 64 not implemented yet
+`;
+
+class UsageError extends Error {}
+
+/** @param {string} msg */
+const err = (msg) => process.stderr.write(msg.endsWith('\n') ? msg : msg + '\n');
+
+async function readStdin() {
+  const chunks = [];
+  for await (const c of process.stdin) chunks.push(c);
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+/** @param {string[]} argv */
+function parse(argv) {
+  try {
+    return parseArgs({
+      args: argv,
+      allowPositionals: true,
+      strict: true,
+      options: {
+        repo: { type: 'string' },
+        project: { type: 'string' },
+        branch: { type: 'string' },
+        'context-file': { type: 'string' },
+        context: { type: 'string' },
+        timeout: { type: 'string' },
+        json: { type: 'boolean' },
+        resume: { type: 'boolean' },
+        list: { type: 'boolean' },
+        version: { type: 'boolean', short: 'v' },
+        help: { type: 'boolean', short: 'h' },
+      },
+    });
+  } catch (e) {
+    throw new UsageError(/** @type {Error} */ (e).message);
+  }
+}
+
+/** @param {string|undefined} s */
+function parseTimeout(s) {
+  if (s === undefined) return 0;
+  if (!/^\d+$/.test(s)) throw new UsageError(`--timeout must be a whole number of seconds, got "${s}"`);
+  return Number(s);
+}
+
+/**
+ * Map an error to an exit code and print it.
+ * @param {unknown} e
+ */
+function fail(e) {
+  if (e instanceof UsageError || e instanceof ConfigError) {
+    err(`ask: ${e.message}`);
+    if (e instanceof UsageError) err('Run `ask --help` for usage.');
+    return EXIT.USAGE;
+  }
+  if (e instanceof HubError) {
+    if (REFUSAL_CODES.has(e.code)) {
+      err(`ask: hub refused (${e.code}): ${e.message}`);
+      return EXIT.REFUSED;
+    }
+    if (e.code === 'invalid_request') {
+      err(`ask: hub rejected the request (invalid_request): ${e.message}`);
+      return EXIT.USAGE;
+    }
+    err(`ask: hub error (${e.code}): ${e.message}`);
+    return EXIT.REFUSED;
+  }
+  if (e instanceof HubUnreachable) {
+    err(`ask: hub unreachable: ${e.message}`);
+    return EXIT.UNREACHABLE;
+  }
+  err(`ask: ${/** @type {Error} */ (e)?.stack ?? e}`);
+  return 1;
+}
+
+/**
+ * Wait for a question, print it, send the receipt. Shared by ask and --resume.
+ * @param {ReturnType<typeof createClient>} client @param {PendingStore} store
+ * @param {{ id: string, client_request_id?: string }} entry
+ * @param {{ timeoutSec: number, json: boolean, signal: AbortSignal }} o
+ */
+async function waitPrintReceipt(client, store, entry, o) {
+  let shownPermalink = false;
+  const result = await client.waitFor(entry.id, {
+    timeoutSec: o.timeoutSec,
+    signal: o.signal,
+    onUpdate: (q) => {
+      if (q.card?.permalink && !shownPermalink) {
+        shownPermalink = true;
+        err(`Card: ${q.card.permalink}`);
+      }
+    },
+  });
+  const q = result.question;
+  if (!result.done) {
+    if (o.json) process.stdout.write(JSON.stringify({ id: entry.id, status: q?.status ?? 'pending' }) + '\n');
+    err(`Still waiting for an answer to ${entry.id}. Fetch it later with:\n  ask --resume ${entry.id}`);
+    return EXIT.TIMEOUT;
+  }
+  if (q.status === 'failed') {
+    const msg = q.error?.message ?? q.error?.code ?? 'no detail';
+    if (o.json) process.stdout.write(JSON.stringify({ id: q.id, status: 'failed', error: q.error }) + '\n');
+    err(`ask: question ${q.id} failed on the hub: ${msg}`);
+    if (entry.client_request_id) store.remove(entry.client_request_id);
+    return EXIT.FAILED;
+  }
+  // answered (or already delivered): print as data, then confirm delivery.
+  if (o.json) {
+    process.stdout.write(
+      JSON.stringify({ id: q.id, status: 'answered', project: q.project, answer: q.answer, card: q.card }) + '\n',
+    );
+  } else {
+    process.stdout.write(formatAnswer(q) + '\n');
+  }
+  const r = await sendReceipt(client, store, entry);
+  if (!r.ok) {
+    err(
+      `ask: the answer was printed but the receipt could not be recorded (${r.error.message}).\n` +
+        `Run \`ask --resume ${q.id}\` to retry the receipt.`,
+    );
+    return r.error instanceof HubError ? EXIT.REFUSED : EXIT.UNREACHABLE;
+  }
+  return EXIT.OK;
+}
+
+/**
+ * @param {string[]} argv
+ * @returns {Promise<number>}
+ */
+export async function main(argv) {
+  const sub = argv[0];
+  if (sub === 'mcp') {
+    const { runMcpServer } = await import('./mcp.js');
+    await runMcpServer();
+    return -1; // keep running; the server exits on stdin close
+  }
+  if (sub === 'setup' || sub === 'doctor' || sub === 'standby') {
+    err(`ask ${sub}: not implemented yet.`);
+    return EXIT.NOT_IMPLEMENTED;
+  }
+
+  const ac = new AbortController();
+  /** @type {string|null} */
+  let currentId = null;
+  const onSigint = () => {
+    ac.abort();
+    err(
+      currentId
+        ? `\nInterrupted. Question ${currentId} is saved; fetch the answer later with:\n  ask --resume ${currentId}`
+        : `\nInterrupted. The question is saved locally; run \`ask --resume\` to continue.`,
+    );
+    process.exit(EXIT.INTERRUPTED);
+  };
+
+  try {
+    const { values, positionals } = parse(argv);
+    if (values.help) {
+      process.stdout.write(HELP);
+      return EXIT.OK;
+    }
+    if (values.version) {
+      process.stdout.write(VERSION + '\n');
+      return EXIT.OK;
+    }
+    const timeoutSec = parseTimeout(values.timeout);
+    const json = !!values.json;
+
+    const { hubUrl } = resolveHubUrl();
+    const store = new PendingStore(pendingFilePath());
+    const client = createClient({ hubUrl, via: 'cli', log: (m) => err(`ask: ${m}`) });
+    process.on('SIGINT', onSigint);
+
+    if (values.list) {
+      if (positionals.length) throw new UsageError('--list takes no arguments');
+      const [p, a] = await Promise.all([client.list('pending'), client.list('answered')]);
+      const qs = [...(p.questions ?? []), ...(a.questions ?? [])].sort((x, y) =>
+        String(y.created_at).localeCompare(String(x.created_at)),
+      );
+      const local = store.all().filter((e) => !e.id || !qs.some((q) => q.id === e.id));
+      if (json) {
+        process.stdout.write(JSON.stringify({ questions: qs, local_only: local }, null, 2) + '\n');
+      } else {
+        for (const q of qs) {
+          process.stdout.write(`${q.id}\t${q.status}\t${q.project}\t${q.created_at}\t${q.question_preview ?? ''}\n`);
+        }
+        for (const e of local) {
+          process.stdout.write(`${e.id ?? '(not sent)'}\tlocal\t${e.project ?? e.repo ?? ''}\t${e.created_at}\t${e.question.slice(0, 80)}\n`);
+        }
+        if (!qs.length && !local.length) err('No pending or undelivered questions.');
+      }
+      return EXIT.OK;
+    }
+
+    if (values.resume) {
+      if (positionals.length > 1) throw new UsageError('--resume takes at most one question id');
+      const target = await findResumeTarget(client, store, positionals[0]);
+      if (!target) {
+        err('ask: nothing to resume: no pending questions locally or on the hub.');
+        return EXIT.USAGE;
+      }
+      let entry = target.entry;
+      if (!target.id && entry) {
+        // The POST never returned an id: retry it with the same client_request_id.
+        err('Re-sending the saved question (same request id, so it cannot be duplicated)…');
+        entry = await submitQuestion(client, store, entry, ac.signal);
+      }
+      const id = /** @type {string} */ (entry?.id ?? target.id);
+      currentId = id;
+      err(`Resuming ${id}…`);
+      return await waitPrintReceipt(
+        client,
+        store,
+        { id, client_request_id: entry?.client_request_id ?? target.client_request_id },
+        { timeoutSec, json, signal: ac.signal },
+      );
+    }
+
+    // Ask a new question.
+    const question = positionals.join(' ').trim();
+    if (!question) throw new UsageError('no question given');
+    if (question.length > 4000) throw new UsageError(`question is ${question.length} characters; the limit is 4000`);
+    if (values.repo && values.project) throw new UsageError('give --repo or --project, not both');
+    if (values['context-file'] && values.context !== undefined) {
+      throw new UsageError('give --context-file or --context, not both');
+    }
+    let context;
+    if (values['context-file']) {
+      try {
+        context = fs.readFileSync(values['context-file'], 'utf8');
+      } catch (e) {
+        throw new UsageError(`cannot read --context-file: ${/** @type {Error} */ (e).message}`);
+      }
+    } else if (values.context === '-') {
+      context = await readStdin();
+    } else if (values.context !== undefined) {
+      context = values.context;
+    }
+    if (context !== undefined && context.length > 8000) {
+      throw new UsageError(`context is ${context.length} characters; the limit is 8000`);
+    }
+
+    let repo = values.repo;
+    let branch = values.branch;
+    const project = values.project;
+    if (!repo && !project) {
+      const g = await gitInfo(process.cwd());
+      if (!g.inRepo) throw new UsageError('not in a git repository; pass --repo org/name or --project slug');
+      if (!g.repo) throw new UsageError('this git repository has no "origin" remote; pass --repo org/name or --project slug');
+      repo = g.repo;
+      branch = branch ?? g.branch ?? undefined;
+    } else if (!branch && repo) {
+      const g = await gitInfo(process.cwd());
+      if (g.repo === repo && g.branch) branch = g.branch;
+    }
+
+    const entry = await submitQuestion(client, store, { question, repo, project, branch, context }, ac.signal);
+    currentId = entry.id;
+    err(`Asked ${entry.id} (${project ? `project ${project}` : repo}${branch ? `, branch ${branch}` : ''}). Waiting for the owner's answer…`);
+    err(`If you stop waiting, fetch the answer later with: ask --resume ${entry.id}`);
+    return await waitPrintReceipt(client, store, /** @type {any} */ (entry), { timeoutSec, json, signal: ac.signal });
+  } catch (e) {
+    if (e instanceof Aborted) return EXIT.INTERRUPTED;
+    return fail(e);
+  } finally {
+    process.off('SIGINT', onSigint);
+  }
+}
+
+const isMain = process.argv[1] && import.meta.url === pathToFileURL(fs.realpathSync(process.argv[1])).href;
+if (isMain) {
+  main(process.argv.slice(2)).then((code) => {
+    if (code >= 0) process.exitCode = code;
+  });
+}

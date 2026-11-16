@@ -1,0 +1,27 @@
+{
+  "name": "drunkencoders-ask",
+  "version": "0.1.0",
+  "description": "Ask the project's owner a question through the drunkencoders hub. One implementation, exposed as a CLI and an MCP server.",
+  "type": "module",
+  "bin": {
+    "ask": "src/cli.js"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/paths.test.js test/cli.test.js test/mcp.test.js",
+    "demo": "node scripts/demo.js",
+    "demo:mcp": "node scripts/demo-mcp.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "zod": "^3.25.76"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
