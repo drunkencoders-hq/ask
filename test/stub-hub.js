@@ -18,6 +18,7 @@ const TERMINAL_WAKE = new Set(['answered', 'delivered', 'failed']);
  *   legacy?: boolean,                  // answer in the pre-change-2 shape (also: no contract-5 answer fields) (no route/answerer/comments/source on lists)
  *   reachable?: () => boolean,         // false → every connection is dropped (hub not reachable yet)
  *   onboarding?: OnboardingOptions,    // contract change 4 (brief 08a §D)
+ *   knowledge?: { name: string, repo: string, ref?: string, kind: string }[],  // contract change 8: GET /v1/knowledge (default: none; an older hub 404s when legacy)
  * }} StubOptions
  *
  * @typedef {{
@@ -350,6 +351,12 @@ export async function startStubHub(opts = {}) {
     const me = state.teammate;
 
     if (m === 'GET' && p === '/v1/whoami') return send(res, 200, { teammate: me, via: 'dev' });
+
+    // Contract change 8: which repos a client keeps a read-only copy of. Known teammates only; never a clone URL.
+    if (m === 'GET' && p === '/v1/knowledge') {
+      if (state.legacy) return error(res, 404, 'not_found', `${m} ${p}`);
+      return send(res, 200, { sources: (opts.knowledge ?? []).map((s) => ({ name: s.name, repo: s.repo, ref: s.ref ?? 'main', kind: s.kind })) });
+    }
 
     if (m === 'POST' && p === '/v1/questions') {
       const body = await readBody(req);

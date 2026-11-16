@@ -14,6 +14,8 @@
 //   STUB_GH_LOGIN  ok | fail   what `gh auth login --web` does (default ok)
 //   STUB_TS_LOGIN_RESULT ok | fail  what `tailscale login` does (default ok)
 //   STUB_SHARE_URL the share link; `open <it>` writes share_accepted
+//   STUB_KNOWLEDGE_ROOT  folder holding fixture git repos at <root>/<org>/<name>; `gh repo clone <org/name> <dir> -- <git args>` clones from it
+//   STUB_GH_NO_ACCESS    comma-separated org/name the signed-in user cannot read (clone fails like a missing invitation)
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -70,6 +72,17 @@ if (args[0] === 'auth' && args[1] === 'login') {
   process.exit(0);
 }
 if (args[0] === 'auth' && args[1] === 'setup-git') process.exit(0);
+if (args[0] === 'repo' && args[1] === 'clone') {
+  const repo = args[2];
+  const dest = args[3];
+  const extra = args.slice(5); // after "--"
+  if (ghState !== 'ok') { process.stderr.write('To get started with GitHub CLI, please run:  gh auth login\\n'); process.exit(4); }
+  if ((process.env.STUB_GH_NO_ACCESS || '').split(',').includes(repo)) { process.stderr.write('GraphQL: Could not resolve to a Repository with the name \\'' + repo + '\\'. (repository)\\n'); process.exit(1); }
+  const { execFileSync } = await import('node:child_process');
+  const src = 'file://' + path.join(process.env.STUB_KNOWLEDGE_ROOT || '', repo);
+  try { execFileSync('git', ['clone', '--quiet', ...extra, src, dest], { stdio: ['ignore', 'ignore', 'pipe'] }); } catch (e) { process.stderr.write(String(e.stderr || e.message) + '\\n'); process.exit(1); }
+  process.exit(0);
+}
 if (args[0] === 'api' && args[1] === 'user') {
   if (ghState !== 'ok') { process.stderr.write('gh: To get started with GitHub CLI, please run:  gh auth login\\n'); process.exit(4); }
   process.stdout.write((process.env.STUB_GH_USER || 'nora-gh') + '\\n'); process.exit(0);

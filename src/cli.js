@@ -48,6 +48,8 @@ Usage:
   ask setup --unregister            remove MCP entries and the config file
   ask doctor [--json]               read-only health checks
   ask agents-snippet                print the AGENTS.md text for projects not made from the starters
+  ask playbook "<words>"            search the team playbook on this machine (read-only copy)
+  ask knowledge sync | status       refresh / list the local copies of the team's knowledge repos
   ask standby                       send a standby test through the hub
 
 Exit codes: 0 answered and receipt recorded · 2 configuration or usage error ·
@@ -202,11 +204,47 @@ async function waitPrintReceipt(client, store, entry, o) {
 }
 
 /**
+ * `ask playbook "<words>"`, `ask knowledge sync|status`.
+ * @param {'knowledge'|'playbook'} sub @param {string[]} args
+ */
+async function runKnowledgeCommand(sub, args) {
+  const { realSys } = await import('./setup/sys.js');
+  const k = await import('./knowledge.js');
+  const sys = realSys();
+  if (sub === 'playbook') {
+    const query = args.join(' ').trim();
+    if (!query) {
+      err('ask: usage: ask playbook "<words>"');
+      return EXIT.USAGE;
+    }
+    process.stdout.write(k.formatSearch(await k.searchPlaybook(sys, query)) + '\n');
+    return EXIT.OK;
+  }
+  if (args.length === 1 && args[0] === 'status') {
+    process.stdout.write(k.formatStatus(await k.knowledgeStatus(sys)) + '\n');
+    return EXIT.OK;
+  }
+  if (args.length === 1 && args[0] === 'sync') {
+    let hubUrl = null;
+    try {
+      hubUrl = resolveHubUrl().hubUrl;
+    } catch {}
+    const { runKnowledgeStep } = await import('./setup/knowledge-step.js');
+    const { results } = await runKnowledgeStep(sys, hubUrl);
+    // A copy that could not be reached is a warning, not a failure of the command.
+    return results.some((r) => r.state === 'failed') ? EXIT.FAILED : EXIT.OK;
+  }
+  err('ask: usage: ask knowledge sync | ask knowledge status');
+  return EXIT.USAGE;
+}
+
+/**
  * @param {string[]} argv
  * @returns {Promise<number>}
  */
 export async function main(argv) {
   const sub = argv[0];
+  if (sub === 'knowledge' || sub === 'playbook') return runKnowledgeCommand(sub, argv.slice(1));
   if (sub === 'agents-snippet' && argv.length === 1) {
     process.stdout.write(fs.readFileSync(new URL('../docs/agents-snippet.md', import.meta.url), 'utf8'));
     return EXIT.OK;

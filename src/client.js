@@ -154,6 +154,8 @@ export function createClient(opts) {
     clientInfo,
     health: () => withRetries(() => request('GET', '/v1/health'), 'health').then((r) => r.data),
     whoami: () => withRetries(() => request('GET', '/v1/whoami'), 'whoami').then((r) => r.data),
+    /** Knowledge sources to keep a read-only copy of (contract change 8); an older hub answers 404. */
+    knowledge: () => withRetries(() => request('GET', '/v1/knowledge'), 'knowledge').then((r) => r.data),
 
     /**
      * POST /v1/questions. Retried with the same client_request_id, so a lost

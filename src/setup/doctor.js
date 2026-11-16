@@ -7,6 +7,8 @@ import { checkHealth, checkWhoami, checkGh } from './checks.js';
 import { ASSISTANTS } from './assistants/index.js';
 import { serverSpec } from './assistants/common.js';
 import { starterNodeWarning } from './nodeversion.js';
+import { createClient } from '../client.js';
+import { fetchSources, readManifest, syncSources, knowledgeStatus, ageText } from '../knowledge.js';
 
 /**
  * @param {import('./sys.js').Sys} sys
@@ -83,6 +85,29 @@ export async function runDoctor(sys, o = {}) {
     }
     line(st === 'registered', `MCP in ${a.label}`, st === 'registered' ? `registered (${a.configPath(sys)})` : st === 'different' ? 'registered with a different command; run ask setup' : 'not registered; run ask setup');
   }
+  // The team playbook copy: pull what is there (10 s, no prompts), then report. Warnings only:
+  // it never changes the exit code (no access yet, no gh, a failed pull).
+  try {
+    let sources = readManifest(sys);
+    if (hubUrl) {
+      const r = await fetchSources(createClient({ hubUrl, via: 'cli', retryDelaysMs: [] }));
+      if (r.ok) sources = r.sources;
+    }
+    if (sources.length) {
+      const pulled = await syncSources(sys, sources, { pullOnly: true });
+      const st = await knowledgeStatus(sys, sources);
+      for (const s of st) {
+        const p = pulled.find((x) => x.name === s.name);
+        if (!s.exists) warn(`Playbook ${s.name}`, 'not on this machine (no access yet, or gh signed out); run `ask knowledge sync`');
+        else if (p?.state === 'failed') warn(`Playbook ${s.name}`, `${p.detail} (${s.commit ?? '?'}, ${ageText(s.ageDays)})`);
+        else if (s.stale) warn(`Playbook ${s.name}`, `${s.commit ?? '?'}, ${ageText(s.ageDays)}: older than 14 days; run \`ask knowledge sync\``);
+        else line(true, `Playbook ${s.name}`, `${s.commit ?? '?'}, ${ageText(s.ageDays)}, read-only`);
+      }
+    }
+  } catch (e) {
+    warn('Playbook', `could not check (${/** @type {Error} */ (e).message})`);
+  }
+
   if (!anyAssistant) note('note  assistants: none detected (use the ask CLI; see `ask setup` for an AGENTS.md snippet)');
 
   if (o.json) sys.out(JSON.stringify({ ok: failed === 0, checks }));

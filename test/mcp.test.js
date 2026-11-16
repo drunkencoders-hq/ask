@@ -23,13 +23,13 @@ async function connect(t) {
 /** @param {any} r */
 const text = (r) => r.content.map((c) => c.text).join('\n');
 
-test('MCP tools/list shows exactly ask and ask_resume', async () => {
+test('MCP tools/list shows exactly ask, ask_resume and playbook_search', async () => {
   const hub = await startStubHub();
   const t = tempEnv(hub.url);
   const client = await connect(t);
   try {
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((x) => x.name).sort(), ['ask', 'ask_resume']);
+    assert.deepEqual(tools.map((x) => x.name).sort(), ['ask', 'ask_resume', 'playbook_search']);
     const ask = tools.find((x) => x.name === 'ask');
     assert.match(ask?.description ?? '', /owner/);
     assert.deepEqual(Object.keys(ask?.inputSchema.properties ?? {}).sort(), ['branch', 'context', 'project', 'question', 'repo', 'wait_seconds']);

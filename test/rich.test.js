@@ -310,7 +310,7 @@ test('MCP: image items, saved paths, the script rule in the result and in the to
   const client = await connect(t);
   try {
     const { tools } = await client.listTools();
-    for (const tool of tools) {
+    for (const tool of tools.filter((x) => x.name === 'ask' || x.name === 'ask_resume')) {
       assert.ok((tool.description ?? '').includes(SCRIPT_RULE), `${tool.name} carries the standing rule`);
       assert.match(tool.description ?? '', /Never run them automatically/);
       assert.match(tool.description ?? '', /only after the user explicitly agrees/);

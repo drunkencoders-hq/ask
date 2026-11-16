@@ -11,6 +11,7 @@ import { serverSpec } from './assistants/common.js';
 import { runStandby } from './standby.js';
 import { readJson, writeJsonWithBackup } from './assistants/common.js';
 import { runOnboarding } from './onboarding.js';
+import { runKnowledgeStep, removeKnowledge } from './knowledge-step.js';
 
 export const AGENTS_SNIPPET = `## Asking the project's owner
 
@@ -189,6 +190,9 @@ async function finishSetup(sys, hubUrl, R) {
   const sc = await runStandby(sys, { hubUrl });
   await R.report('standby', sc === 0 ? 'done' : 'blocked', sc === 0 ? undefined : `exit ${sc}`);
   if (sc !== 0) return sc;
+  // The team playbook: a read-only local copy. Never fails the set-up.
+  step('Playbook');
+  await runKnowledgeStep(sys, hubUrl);
   if (failed.length) {
     sys.err(`ask setup: FAILED: MCP registration failed for ${failed.join(', ')}. Fix the error above, then paste the same command again.`);
     return 1;
@@ -253,6 +257,10 @@ async function setup(sys, hubArg) {
   step('Standby check');
   const sc = await runStandby(sys, { hubUrl });
   if (sc !== 0) return sc;
+
+  // 8. The team playbook: a read-only local copy. Never fails the set-up.
+  step('Playbook');
+  await runKnowledgeStep(sys, hubUrl);
   if (failedAssistants.length) {
     sys.err(`ask setup: FAILED: MCP registration failed for ${failedAssistants.join(', ')}. Fix the error above and run ask setup again.`);
     return 1;
@@ -296,6 +304,7 @@ async function unregister(sys) {
       sys.err(`${a.label}: could not remove: ${/** @type {Error} */ (e).message}`);
     }
   }
+  removeKnowledge(sys);
   const file = cfgPath(sys);
   if (sys.fs.existsSync(file)) {
     sys.fs.rmSync(file);
