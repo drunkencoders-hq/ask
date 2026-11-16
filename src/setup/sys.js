@@ -19,7 +19,7 @@ import { pathFor } from '../config.js';
  *   out: (line: string) => void,
  *   err: (line: string) => void,
  *   which: (cmd: string) => string|null,
- *   run: (cmd: string, args: string[], o?: { input?: string, timeoutMs?: number }) => Promise<RunResult>,
+ *   run: (cmd: string, args: string[], o?: { input?: string, timeoutMs?: number, env?: Record<string, string> }) => Promise<RunResult>,
  *   runInteractive: (cmd: string, args: string[]) => Promise<number|null>,
  *   prompt: (question: string) => Promise<string>,
  *   now: () => Date,
@@ -96,7 +96,7 @@ export function realSys(over = {}) {
         let stderr = '';
         let child;
         try {
-          child = spawn(plan.file, plan.args, { env: /** @type {any} */ (env), shell: plan.shell, windowsHide: true, timeout: o.timeoutMs ?? 30_000 });
+          child = spawn(plan.file, plan.args, { env: /** @type {any} */ ({ ...env, ...(o.env ?? {}) }), shell: plan.shell, windowsHide: true, timeout: o.timeoutMs ?? 30_000 });
         } catch (e) {
           return resolve({ code: null, stdout, stderr, error: /** @type {Error} */ (e) });
         }

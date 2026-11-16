@@ -120,6 +120,35 @@ test('Tailscale CLI location: PATH, then the macOS app bundle / Windows Program 
   assert.equal(locateTailscale(/** @type {any} */ ({ ...mk('darwin', {}), which: () => '/usr/local/bin/tailscale' })), '/usr/local/bin/tailscale');
 });
 
+test('Tailscale on macOS: /usr/local/bin and /opt/homebrew/bin wrappers are preferred to the app bundle', () => {
+  const app = '/Applications/Tailscale.app/Contents/MacOS/Tailscale';
+  const mk = (files) => /** @type {any} */ ({ platform: 'darwin', env: {}, which: () => null, fs: memfs(files) });
+  assert.equal(locateTailscale(mk({ [app]: '', '/usr/local/bin/tailscale': '' })), '/usr/local/bin/tailscale');
+  assert.equal(locateTailscale(mk({ [app]: '', '/opt/homebrew/bin/tailscale': '' })), '/opt/homebrew/bin/tailscale');
+  assert.equal(locateTailscale(mk({ [app]: '' })), app);
+});
+
+test('Tailscale calls set SHLVL=1 when it is missing (app binary started without a shell)', async () => {
+  const hub = await startStubHub();
+  const t = setupEnv(hub, { env: { STUB_TS_NEEDS_SHLVL: '1' } });
+  t.env.ASK_HUB_URL = hub.url;
+  delete t.env.SHLVL;
+  try {
+    const d = await runCli(['doctor'], t).done;
+    assert.match(d.stdout, /^ok {4}Tailscale: signed in as nora@example\.com/m, d.stdout);
+    // Control: the stub really fails without SHLVL.
+    const { spawnSync } = await import('node:child_process');
+    const env = { ...t.env };
+    delete env.SHLVL;
+    const raw = spawnSync(path.join(t.dir, 'stubs', 'tailscale'), ['status', '--json'], { env, encoding: 'utf8' });
+    assert.equal(raw.status, 1);
+    assert.match(raw.stderr, /CLIError error 3/);
+  } finally {
+    await hub.close();
+    t.cleanup();
+  }
+});
+
 test('setup: Tailscale not installed → non-zero naming Tailscale', async () => {
   const hub = await startStubHub();
   const lines = [];

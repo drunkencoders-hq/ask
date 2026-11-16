@@ -6,6 +6,7 @@
 //   STUB_TS_LOGIN  login name                                  (default nora@example.com)
 //   STUB_TS_UP     ok | fail   what `tailscale up` does         (default fail)
 //   STUB_GH        ok | signed_out                             (default ok)
+//   STUB_TS_NEEDS_SHLVL  1: fail like the macOS app binary when SHLVL is unset
 //   STUB_LOG       file to append each invocation to
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,6 +23,11 @@ if (process.env.STUB_LOG) fs.appendFileSync(process.env.STUB_LOG, NAME + ' ' + a
 
 const BODIES = {
   tailscale: `
+if (process.env.STUB_TS_NEEDS_SHLVL === '1' && !process.env.SHLVL) {
+  // Like the macOS app-bundle binary started without a shell.
+  process.stderr.write('The Tailscale GUI failed to start: The operation couldn’t be completed. (Tailscale.CLIError error 3.)\\n');
+  process.exit(1);
+}
 const state = process.env.STUB_TS_STATE || 'running';
 const login = process.env.STUB_TS_LOGIN || 'nora@example.com';
 if (args[0] === 'status' && args[1] === '--json') {
