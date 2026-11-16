@@ -11,6 +11,7 @@ import { writeStubBin } from './fixtures/stub-bin.js';
 import { memfs } from './fixtures/memfs.js';
 import { locateTailscale } from '../src/setup/tailscale.js';
 import { runSetup } from '../src/setup/setup.js';
+import { VERSION } from '../src/client.js';
 
 /**
  * @param {any} hub @param {{ stubs?: string[], env?: Record<string,string>, cursor?: boolean }} [o]
@@ -62,7 +63,7 @@ test('setup: config, Tailscale, hub, gh, whoami, all four assistants, standby �
     const sb = hub.state.createBodies.find((b) => b.kind === 'standby_test');
     assert.deepEqual(sb.client.tools.sort(), ['claude-code', 'codex', 'cursor', 'gemini-cli']);
     assert.equal(hub.state.statusPosts.length, 1);
-    assert.match(hub.state.statusPosts[0], /^Standby verified: nora on .+ — ask 0\.1\.0, darwin, tools: /);
+    assert.match(hub.state.statusPosts[0], new RegExp(`^Standby verified: nora on .+ — ask ${VERSION.replace(/\./g, '\\.')}, darwin, tools: `));
     assert.equal(JSON.parse(fs.readFileSync(path.join(t.home, '.cursor', 'mcp.json'), 'utf8')).mcpServers.ask.command, 'ask');
 
     const before = snapshot(t.home);

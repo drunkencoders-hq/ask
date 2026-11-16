@@ -441,6 +441,22 @@ A resend reuses the same id, so the hub never creates a duplicate. The
 entry is removed once the receipt succeeds; if the receipt fails it stays,
 and `ask --resume` retries it.
 
+## Releases
+
+- **One source of truth:** the `version` in `package.json`. The CLI and the MCP
+  server read it at run time (`ask --version`); nothing in `src/` repeats it.
+- **`CHANGELOG.md`** has one entry per release, newest first, written for the
+  person who will see the change. A test fails when its newest entry and
+  `package.json` disagree.
+- **Semver:** a patch for fixes, a minor for anything a teammate will see, a major
+  for something that breaks. Every release bumps the version and adds its entry.
+- **Process:** the lead tags each release `v<semver>` when pushing and posts the
+  update notice for it (`ask announce`, below).
+- **Old clients.** `ask` 0.1.0 never sent its version and never warns. The first
+  notice after 0.2.0 (the one for rich answers) therefore reaches a teammate as a
+  Slack message only; the bot's ✅ appears after she has updated and made her
+  next call.
+
 ## Development
 
 ```
