@@ -21,6 +21,8 @@ import { pathFor } from '../config.js';
  *   which: (cmd: string) => string|null,
  *   run: (cmd: string, args: string[], o?: { input?: string, timeoutMs?: number, env?: Record<string, string> }) => Promise<RunResult>,
  *   runInteractive: (cmd: string, args: string[]) => Promise<number|null>,
+ *   runTee: (cmd: string, args: string[], o?: { timeoutMs?: number, env?: Record<string, string>, onLine?: (line: string) => void }) => Promise<RunResult>,
+ *   openUrl: (url: string) => Promise<boolean>,
  *   prompt: (question: string) => Promise<string>,
  *   now: () => Date,
  *   fs: typeof fs,
@@ -114,6 +116,55 @@ export function realSys(over = {}) {
         child.on('error', () => resolve(null));
         child.on('close', (code) => resolve(code));
       }),
+    // Run without a terminal (so the program asks nothing), echo its output
+    // line by line to stderr and hand each line to onLine.
+    runTee: (cmd, args, o = {}) =>
+      new Promise((resolve) => {
+        const file = path.isAbsolute(cmd) ? cmd : (whichIn(cmd, base) ?? cmd);
+        const plan = spawnPlan(file, args, platform);
+        let stdout = '';
+        let stderr = '';
+        let child;
+        try {
+          child = spawn(plan.file, plan.args, { env: /** @type {any} */ ({ ...env, ...(o.env ?? {}) }), shell: plan.shell, windowsHide: true, timeout: o.timeoutMs ?? 15 * 60_000 });
+        } catch (e) {
+          return resolve({ code: null, stdout, stderr, error: /** @type {Error} */ (e) });
+        }
+        const feed = () => {
+          let partial = '';
+          return (d) => {
+            partial += d;
+            const lines = partial.split(/\r?\n/);
+            partial = lines.pop() ?? '';
+            for (const l of lines) {
+              process.stderr.write(l + '\n');
+              o.onLine?.(l);
+            }
+          };
+        };
+        const fo = feed();
+        const fe = feed();
+        child.stdout.setEncoding('utf8').on('data', (d) => {
+          stdout += d;
+          fo(d);
+        });
+        child.stderr.setEncoding('utf8').on('data', (d) => {
+          stderr += d;
+          fe(d);
+        });
+        child.on('error', (e) => resolve({ code: null, stdout, stderr, error: e }));
+        child.on('close', (code) => resolve({ code, stdout, stderr }));
+        child.stdin.end('');
+      }),
+    // Open a URL in the default browser (macOS `open`, Windows url.dll).
+    openUrl: async (url) => {
+      if (!/^https?:\/\//.test(url)) return false;
+      const r =
+        platform === 'win32'
+          ? await sys.run('rundll32.exe', ['url.dll,FileProtocolHandler', url], { timeoutMs: 15_000 })
+          : await sys.run('open', [url], { timeoutMs: 15_000 });
+      return r.code === 0;
+    },
     prompt: async (question) => {
       if (!sys.interactive) return '';
       const rl = (await import('node:readline/promises')).createInterface({ input: process.stdin, output: process.stderr });

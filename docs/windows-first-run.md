@@ -12,7 +12,7 @@ PowerShell 5.1, winget, UAC and the npm shims were never exercised.
 In a normal (not "Run as administrator") **Windows PowerShell** window:
 
 ```powershell
-& ([scriptblock]::Create((irm <bootstrap.windows>))) -Hub http://<mini>:8787
+& ([scriptblock]::Create((irm <bootstrap.windows>))) -Hub http://<hub-address>
 ```
 
 Add `-DryRun` first to see the plan without changing anything.
@@ -83,6 +83,6 @@ the output of `winget --version; node --version; npm.cmd prefix -g; $env:Path`.
 
 ## Done looks like
 
-- `Standby verified: <teammate> via http://<mini>:8787` printed by setup,
+- `Standby verified: <teammate> via http://<hub-address>` printed by setup,
   and a matching "Standby verified: … win32 …" line in `#runner`.
 - `ask doctor` prints `ok` on every line.

@@ -12,38 +12,87 @@ Windows. Node ≥ 20, no build step.
 
 ## Install
 
-Teammates get one command by Slack DM (`/onboard`):
+Newcomers get one command by Slack DM when they join (or by `/onboard`).
+It carries the hub address, a one-time set-up token and, when needed, a
+Tailscale share link; none of these are in this repo:
 
-- macOS (Terminal): `curl -fsSL <bootstrap.macos> | bash -s -- --hub <hub_url>`
-- Windows (PowerShell): `& ([scriptblock]::Create((irm <bootstrap.windows>))) -Hub <hub_url>`
+- macOS (Terminal): `curl -fsSL <bootstrap.macos> | bash -s -- --hub <hub_url> --token <token> [--share <link>]`
+- Windows (PowerShell): `& ([scriptblock]::Create((irm <bootstrap.windows>))) -Hub <hub_url> -Token <token> [-Share <link>]`
 
 Add `--dry-run` / `-DryRun` to see the plan without changing anything. Both
-are safe to run again. By hand: `npm install -g git+https://github.com/drunkencoders-hq/ask.git`,
-then `ask setup --hub <hub_url>`.
+are safe to run again. A teammate the hub already knows can leave out the
+token. By hand: `npm install -g git+https://github.com/drunkencoders-hq/ask.git`,
+then `ask setup --hub <hub_url> [--token <token>]`.
 
 ## What the bootstrap does to your machine
 
-### macOS (`bootstrap.sh`)
+### macOS (`bootstrap.sh`): no questions asked
+
+You approve only **macOS's own prompts** (your Mac password, and allowing
+Tailscale's VPN configuration) and **two sign-ins in your browser**
+(GitHub, then Tailscale). The script types, reads and stores no password.
 
 1. Refuses to run as root or on anything but macOS.
-2. Homebrew: uses it if present. If it is missing, it asks y/N and only
-   then runs Homebrew's official installer (which asks for your password).
-3. Installs with Homebrew **only what is missing**: Node (if missing or
-   older than 20), `git`, `gh` (GitHub CLI), Tailscale (`tailscale-app`
-   cask, which asks to allow a VPN configuration). It opens Tailscale once.
-4. Installs or updates `ask` with `npm install -g` from the public
-   `drunkencoders-hq/ask` repo.
-5. Runs `ask setup --hub <hub_url>`, which:
+2. Installs **only what is missing**, in this order:
+   1. Homebrew, with its official installer in non-interactive mode. That
+      mode cannot ask for your password itself, so just before it the
+      script runs `sudo -v`: macOS asks for your Mac password once (your
+      account must be an administrator). Nothing else runs with sudo.
+   2. `git` (Homebrew). Apple's `/usr/bin/git` counts only when the Command
+      Line Tools are installed, so their install dialog never pops up.
+   3. Node (Homebrew; if missing or older than 20).
+   4. `gh`, the GitHub CLI (Homebrew).
+   5. The Tailscale app (`tailscale-app` cask; macOS asks for your password
+      and, on first start, to allow a VPN configuration).
+   6. `ask`, with `npm install -g` from the public `drunkencoders-hq/ask`
+      repo (an existing `ask` is updated).
+   7. Claude Code (`claude-code` cask), only if none of Claude Code, Cursor
+      or Codex CLI is installed.
+3. Runs `ask setup --hub <hub_url>` with the token, which:
+   - signs you in to GitHub: `gh auth login --web` without a terminal, so
+     gh asks nothing; the one-time code is copied to your clipboard and
+     github.com/login/device opens in your browser. Reads your GitHub login
+     with `gh api user`;
+   - starts the Tailscale app and signs you in (`tailscale login`, the
+     sign-in page opens in your browser);
+   - waits for the hub. If it is not reachable and your message had a share
+     link, it opens that link once so you can accept the Mac mini's share.
+     It gives up after 15 minutes (exit 4; paste the command again);
+   - reports who you are (below) and waits until your registration is
+     confirmed in Slack (refused, or the command expired: exit 5, ask for a
+     new command with `/onboard`);
    - writes `~/.config/drunkencoders/ask.json` containing only `hub_url`;
-   - signs you in to Tailscale (browser) and GitHub (`gh auth login`) if
-     you are not signed in;
-   - checks that the hub answers and knows who you are;
    - registers the `ask` MCP server with Claude Code, Cursor, Codex CLI and
-     Gemini CLI if they are installed. It uses each tool's own
-     `mcp add` command, or for Cursor it edits `~/.cursor/mcp.json` after a
-     timestamped backup;
-   - prints a snippet for `AGENTS.md` for other AI tools;
-   - sends a standby test; "Standby verified" appears in `#runner`.
+     Gemini CLI if they are installed (each tool's own `mcp add` command;
+     for Cursor an edit of `~/.cursor/mcp.json` after a timestamped
+     backup), and prints a snippet for `AGENTS.md` for other AI tools;
+   - sends a standby test; "Standby verified" appears in `#runner`;
+   - reports `ready`, then sends a first test question to your mentor
+     ("Set-up test from <your Mac's name>: this is my first question through
+     `ask`. Can you see it?") and shows the answer if it comes within 10
+     minutes (otherwise `ask --resume` collects it later). Leave it out with
+     `--no-first-question`.
+
+**What is sent to the hub**, and nothing else about your machine:
+
+- `hello`: the ask version, your Mac's host name and OS;
+- `identity`: your GitHub login, OS, host name, and which AI assistants are
+  installed (for example `claude-code`). Your Slack identity comes from the
+  token and your Tailscale login from the connection;
+- one progress report per step, posted as a short line in your mentoring
+  channel: step (`homebrew`, `git`, `node`, `gh`, `tailscale`, `ask`,
+  `assistant`, `github-sign-in`, `tailscale-sign-in`, `hub-reached`,
+  `identity`, `registered`, `mcp`, `standby`, `ready`), status (`started`,
+  `done`, `blocked`, `skipped`) and a short note (for example "installed",
+  or the time of a step done before the hub was reachable). Steps the
+  script does before that are kept in a temporary file (no token in it),
+  sent in order once the hub answers, and the file is deleted. A report
+  that fails is printed and never stops the set-up;
+- the standby test and the first question, as above.
+
+The token is passed to `ask setup` through its environment, held in
+memory, never written to disk (not in `ask.json`, the pending-answers file
+or the step file), never printed, and not passed on to any other program.
 
 ### Windows (`bootstrap.ps1`)
 
@@ -57,7 +106,11 @@ then `ask setup --hub <hub_url>`.
    tool is not visible yet, it asks you to open a new PowerShell window
    and paste the same command again.
 4. Installs or updates `ask` with `npm.cmd install -g`.
-5. Runs `ask setup --hub <hub_url>` (same steps as on macOS). The config is
+5. Runs `ask setup --hub <hub_url>`, with `-Token`/`-Share` passed to it
+   through its environment (same steps as on macOS; Tailscale sign-in may
+   instead need the tray icon's "Log in"). Windows still installs without
+   per-tool questions but is not hands-free in the macOS sense: UAC prompts
+   and a possible new-window restart remain. The config is
    `%APPDATA%\drunkencoders\ask.json`. MCP entries point at
    `node.exe …\drunkencoders-ask\src\cli.js mcp`, because some tools
    cannot start npm's `ask.cmd`.
@@ -65,7 +118,8 @@ then `ask setup --hub <hub_url>`.
 Neither script adds a background service, scheduled task, login item,
 startup entry or auto-update, and neither edits your shell profile
 (package managers may add themselves to `PATH`). The only things written
-are the hub address and the MCP entries. No tokens or keys are written.
+are the hub address and the MCP entries (plus, during set-up, the step file
+in your temp folder, deleted at the end). No tokens or keys are written.
 
 ### Uninstall
 
@@ -82,6 +136,9 @@ to an edited assistant config can be deleted.
 
 ```
 ask setup --hub <url>    configure, sign in, register MCP, run the standby check
+ask setup --hub <url> --token <t> [--share <link>] [--no-first-question]
+                         the same for a newcomer: report in, wait for registration
+                         in Slack, then `ready` and a first test question
 ask setup --unregister   remove the MCP entries and the config file
 ask doctor               read-only checks, one line each; non-zero if any fail
 ask standby              standby test through the hub; prints "Standby verified: <you> via <hub>"
@@ -93,6 +150,14 @@ machine (`unknown_caller`, the message shows your Tailscale login to send to
 Jose), an installed assistant that could not be registered, or a standby
 check without a receipt. Without a terminal (`ASK_NONINTERACTIVE=1`, or
 stdin not a TTY) it never starts a sign-in; it says what to do instead.
+
+With `--token` (a newcomer's set-up) it signs in through the browser
+instead, without asking anything, and uses the hub's onboarding routes
+(contract change 4). Exit 4: the hub was not reachable within 15 minutes,
+or the Tailscale sign-in did not finish. Exit 5: the registration was
+refused, the command expired or was already used (ask for a new one with
+`/onboard`), or the hub could not identify the Tailscale login. A failed
+first question or progress report does not change the exit code.
 
 Assistant config locations, checked against each tool's docs:
 
@@ -224,7 +289,7 @@ them. Repo and branch default from the server's working directory.
 
 | | macOS (and other POSIX) | Windows |
 |---|---|---|
-| Config (`{"hub_url": "http://mini:8787"}`) | `$XDG_CONFIG_HOME/drunkencoders/ask.json`, default `~/.config/drunkencoders/ask.json` | `%APPDATA%\drunkencoders\ask.json` |
+| Config (`{"hub_url": "http://hub.invalid:8787"}`) | `$XDG_CONFIG_HOME/drunkencoders/ask.json`, default `~/.config/drunkencoders/ask.json` | `%APPDATA%\drunkencoders\ask.json` |
 | Pending questions | `$XDG_STATE_HOME/drunkencoders/ask/pending.json`, default `~/.local/state/drunkencoders/ask/pending.json` | `%LOCALAPPDATA%\drunkencoders\ask\pending.json` |
 
 `ASK_HUB_URL` overrides the config file. With neither, `ask` exits 2 and
@@ -245,7 +310,17 @@ npm run demo      # CLI end to end against the stub; stub answers after 2 s
 npm run demo:mcp  # MCP handshake, tools/list, ask, against the stub
 npm run demo:mentor       # mentor answers, with one comment from a third teammate
 npm run demo:slack-start  # bare `ask --resume` picks up a question started in Slack
+npm run rehearse:bootstrap            # bootstrap.sh for real, piped like curl|bash, stubs only
+npm run rehearse:bootstrap -- all     # + installed, refused, expired, unreachable, progress-fail
 ```
+
+The rehearsal runs `bootstrap.sh` in a new session without a terminal,
+with a `PATH` of stubs (Homebrew installer, brew, git, node, npm, sudo, gh,
+tailscale, claude, open) and a few system tools, a throwaway `HOME` and
+temp dir, and the stub hub on 127.0.0.1 approving the registration after
+a second. It checks the token appears nowhere afterwards and removes
+everything. The real proof is a Mac with none of this:
+[docs/macos-first-run.md](docs/macos-first-run.md).
 
 PowerShell checks for `bootstrap.ps1` run in a throwaway Docker container
 (PowerShell 7 on Linux, so not Windows PowerShell 5.1 or real Windows):
@@ -257,7 +332,7 @@ docker run --rm -v "$PWD:/src:ro" mcr.microsoft.com/powershell:7.4-ubuntu-22.04 
 docker rmi mcr.microsoft.com/powershell:7.4-ubuntu-22.04
 ```
 
-`bash bootstrap.sh --dry-run --hub http://mini:8787` and `shellcheck bootstrap.sh`
+`bash bootstrap.sh --dry-run --hub http://hub.invalid:8787` and `shellcheck bootstrap.sh`
 check the macOS script without changing anything.
 
 The hub contract is "Hub HTTP API v1" in the planning folder's

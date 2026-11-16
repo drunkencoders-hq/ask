@@ -39,8 +39,8 @@ test('hub address: ASK_HUB_URL wins, else hub_url from the config file, else a C
     const p = { platform: 'darwin', homedir: dir, env: { XDG_CONFIG_HOME: dir } };
     assert.throws(() => resolveHubUrl(p), (e) => e instanceof ConfigError && /ask setup/.test(e.message));
     fs.mkdirSync(path.join(dir, 'drunkencoders'));
-    fs.writeFileSync(path.join(dir, 'drunkencoders', 'ask.json'), JSON.stringify({ hub_url: 'http://mini:8787/' }), 'utf8');
-    assert.equal(resolveHubUrl(p).hubUrl, 'http://mini:8787');
+    fs.writeFileSync(path.join(dir, 'drunkencoders', 'ask.json'), JSON.stringify({ hub_url: 'http://hub.invalid:8787/' }), 'utf8');
+    assert.equal(resolveHubUrl(p).hubUrl, 'http://hub.invalid:8787');
     assert.equal(resolveHubUrl({ ...p, env: { ...p.env, ASK_HUB_URL: 'http://127.0.0.1:9' } }).hubUrl, 'http://127.0.0.1:9');
     fs.writeFileSync(path.join(dir, 'drunkencoders', 'ask.json'), '{}', 'utf8');
     assert.throws(() => resolveHubUrl(p), /hub_url/);

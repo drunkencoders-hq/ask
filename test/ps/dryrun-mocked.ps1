@@ -3,7 +3,7 @@
 # Windows machine that has winget and nothing else. Proves the dry-run path
 # end to end; it is not a Windows run.
 . (Join-Path $PSScriptRoot '..' '..' 'bootstrap.ps1')
-$Hub = 'http://mini:8787'
+$Hub = 'http://hub.invalid:8787'
 $DryRun = [switch]::new($true)
 function Test-IsWindowsHost { $true }
 function Find-Tool([string]$Name) { if ($Name -eq 'winget.exe') { 'C:\Users\nora\AppData\Local\Microsoft\WindowsApps\winget.exe' } else { $null } }

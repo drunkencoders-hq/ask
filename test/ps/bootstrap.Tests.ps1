@@ -12,12 +12,12 @@ Describe 'argument and platform checks' {
         { Assert-HubUrl '' } | Should -Throw '*no hub address*'
     }
     It 'refuses a non-http hub address and shell metacharacters' {
-        { Assert-HubUrl 'mini:8787' } | Should -Throw '*http*'
-        { Assert-HubUrl 'http://mini:8787 & calc' } | Should -Throw '*http*'
+        { Assert-HubUrl 'hub.invalid:8787' } | Should -Throw '*http*'
+        { Assert-HubUrl 'http://hub.invalid:8787 & calc' } | Should -Throw '*http*'
     }
     It 'accepts a plain hub address' {
-        { Assert-HubUrl 'http://mini:8787' } | Should -Not -Throw
-        { Assert-HubUrl 'http://100.64.0.1:8787/' } | Should -Not -Throw
+        { Assert-HubUrl 'http://hub.invalid:8787' } | Should -Not -Throw
+        { Assert-HubUrl 'http://127.0.0.1:8787/' } | Should -Not -Throw
     }
     It 'refuses non-Windows hosts' {
         Mock Test-IsWindowsHost { $false }
@@ -40,7 +40,7 @@ Describe 'winget package IDs' {
 
 Describe 'Invoke-Main' {
     BeforeEach {
-        $Hub = 'http://mini:8787'
+        $Hub = 'http://hub.invalid:8787'
         $DryRun = $false
         $script:installed = @{ 'winget.exe' = $true; 'node.exe' = $true; 'git.exe' = $true; 'gh.exe' = $true; 'npm.cmd' = $true; 'ask.cmd' = $true; 'tailscale.exe' = $true }
         $script:calls = [System.Collections.Generic.List[string]]::new()
@@ -67,7 +67,7 @@ Describe 'Invoke-Main' {
         ($lines -join "`n") | Should -Match 'would run: winget install --id OpenJS.NodeJS.LTS --exact --source winget'
         ($lines -join "`n") | Should -Match 'would run: winget install --id Tailscale.Tailscale'
         ($lines -join "`n") | Should -Match 'would run: npm.cmd install -g git\+https://github.com/drunkencoders-hq/ask.git'
-        ($lines -join "`n") | Should -Match 'would run: ask.cmd setup --hub http://mini:8787'
+        ($lines -join "`n") | Should -Match 'would run: ask.cmd setup --hub http://hub.invalid:8787'
         $lines[-1] | Should -BeExactly 'DRY RUN OK: no changes made'
     }
 
@@ -78,7 +78,7 @@ Describe 'Invoke-Main' {
         $code | Should -Be 0
         @($script:calls | Where-Object { $_ -like 'winget*' }).Count | Should -Be 1
         $script:calls[0] | Should -Match '--id GitHub.cli'
-        $script:calls | Should -Contain 'ask setup --hub http://mini:8787'
+        $script:calls | Should -Contain 'ask setup --hub http://hub.invalid:8787'
         Should -Invoke Update-SessionPath -Times 2
     }
 
@@ -102,7 +102,7 @@ Describe 'Invoke-Main' {
         $code = Invoke-Main
         $code | Should -Be 1
         ($lines -join "`n") | Should -Match 'FAILED: Git was installed but this window cannot see it yet. Open a new PowerShell window'
-        $script:calls | Should -Not -Contain 'ask setup --hub http://mini:8787'
+        $script:calls | Should -Not -Contain 'ask setup --hub http://hub.invalid:8787'
     }
 
     It 'fails with one line when winget fails' {
@@ -124,5 +124,64 @@ Describe 'Invoke-Main' {
         Mock Test-IsWindowsHost { $false }
         (Invoke-Main) | Should -Be 1
         $script:calls.Count | Should -Be 0
+    }
+}
+
+Describe 'set-up token and share link (brief 04b)' {
+    BeforeEach {
+        $Hub = 'http://hub.invalid:8787'
+        $Token = 'tok_PESTER_0123456789abcdef'
+        $Share = 'https://login.tailscale.com/admin/invite/PESTERSHARE'
+        $DryRun = $false
+        $NoFirstQuestion = $false
+        $script:installed = @{ 'winget.exe' = $true; 'node.exe' = $true; 'git.exe' = $true; 'gh.exe' = $true; 'npm.cmd' = $true; 'ask.cmd' = $true; 'tailscale.exe' = $true }
+        Mock Test-IsWindowsHost { $true }
+        Mock Find-Tool { param($Name) if ($script:installed[$Name]) { "C:\tools\$Name" } else { $null } }
+        Mock Find-Tailscale { 'C:\Program Files\Tailscale\tailscale.exe' }
+        Mock Get-NodeMajor { 22 }
+        Mock Update-SessionPath {}
+        Mock Invoke-Winget { 0 }
+        Mock Invoke-NpmInstall { 0 }
+        $script:lines = [System.Collections.Generic.List[string]]::new()
+        Mock Write-Host { param($Object) $script:lines.Add([string]$Object) }
+    }
+
+    It 'dry run masks the token and the share link and lists the reports' {
+        $DryRun = $true
+        $script:installed['ask.cmd'] = $false
+        (Invoke-Main) | Should -Be 0
+        $all = $script:lines -join "`n"
+        $all.Contains($Token) | Should -BeFalse
+        $all.Contains($Share) | Should -BeFalse
+        $all | Should -Match 'would run: ask.cmd setup --hub http://hub.invalid:8787 --token \*{8} --share <link from your message>'
+        $all | Should -Match 'would report: node skipped'
+        $all | Should -Match 'would report: ask done \(installed\)'
+        $script:lines[-1] | Should -BeExactly 'DRY RUN OK: no changes made'
+    }
+
+    It 'hands the token and the queue file to ask setup through the environment only, then removes them' {
+        $env:ComSpec = 'cmd.exe'
+        $script:seen = $null
+        Mock Start-Process {
+            param($FilePath, $ArgumentList)
+            $q = $env:ASK_ONBOARDING_QUEUE
+            $script:seen = @{ args = [string]$ArgumentList; token = $env:ASK_ONBOARDING_TOKEN; share = $env:ASK_ONBOARDING_SHARE; queue = (Get-Content -LiteralPath $q -Raw) }
+            [pscustomobject]@{ ExitCode = 0 }
+        }
+        (Invoke-Main) | Should -Be 0
+        $script:seen.args | Should -BeExactly '/d /c ask.cmd setup --hub http://hub.invalid:8787'
+        $script:seen.token | Should -BeExactly $Token
+        $script:seen.share | Should -BeExactly $Share
+        $script:seen.queue | Should -Match "`tnode`tskipped`talready installed"
+        $script:seen.queue.Contains($Token) | Should -BeFalse
+        Test-Path Env:\ASK_ONBOARDING_TOKEN | Should -BeFalse
+        Test-Path Env:\ASK_ONBOARDING_SHARE | Should -BeFalse
+        ($script:lines -join "`n").Contains($Token) | Should -BeFalse
+    }
+
+    It 'refuses a share link that is not https' {
+        $Share = 'file:///c:/x'
+        (Invoke-Main) | Should -Be 1
+        ($script:lines -join "`n") | Should -Match 'FAILED: -Share must be an https:// link'
     }
 }

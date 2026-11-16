@@ -15,7 +15,22 @@ const TERMINAL_WAKE = new Set(['answered', 'delivered', 'failed']);
  *   autoAnswerText?: string,
  *   mentors?: Record<string, string>,  // mentee → mentor (contract change 2); default none
  *   legacy?: boolean,                  // answer in the pre-change-2 shape (no route/answerer/comments/source on lists)
+ *   reachable?: () => boolean,         // false → every connection is dropped (hub not reachable yet)
+ *   onboarding?: OnboardingOptions,    // contract change 4 (brief 08a §D)
  * }} StubOptions
+ *
+ * @typedef {{
+ *   token: string,                     // the one live token (the stub keeps it in memory only)
+ *   displayName?: string,              // Slack display name
+ *   teammate?: string,                 // name written to config on "Register"
+ *   mentor?: string|null,              // mentor on "Register" (null: a teammate without one)
+ *   tailscaleLogin?: string|null,      // what whois reports; null → 403 caller_unidentified
+ *   decision?: 'register'|'refuse'|'expire'|'manual',  // what happens after an identity report
+ *   decideAfterMs?: number,
+ *   registered?: boolean,              // start already registered (a second run)
+ *   failProgress?: number,             // next N progress calls → 503 (or 'drop' them)
+ *   rateLimit?: number,                // calls per token before 429 (default: none)
+ * }} OnboardingOptions
  */
 
 /** @param {StubOptions} [opts] */
@@ -47,6 +62,8 @@ export async function startStubHub(opts = {}) {
     receiptBodies: [],
     /** lines the hub would post to #runner */
     statusPosts: /** @type {string[]} */ ([]),
+    /** @type {any} contract change 4 state, when opts.onboarding is set */
+    onboarding: null,
   };
 
   const notify = () => {
@@ -110,12 +127,172 @@ export async function startStubHub(opts = {}) {
       });
     });
 
+  // ---- Contract change 4: onboarding routes (brief 08a §C, §D, §F) ----
+  const ob = opts.onboarding ?? null;
+  state.onboarding = ob
+    ? {
+        state: ob.registered ? 'registered' : 'invited',
+        tokenDead: false,
+        registeredAt: ob.registered ? Date.now() : null,
+        identity: /** @type {any} */ (null),
+        boundLogin: /** @type {string|null} */ (null),
+        calls: 0,
+        failProgress: ob.failProgress ?? 0,
+        /** accepted progress reports, in arrival order */
+        progress: /** @type {any[]} */ ([]),
+        /** lines the hub would post in the mentoring channel */
+        posts: /** @type {string[]} */ ([]),
+        seenRequestIds: new Set(),
+        identityCalls: 0,
+        helloCalls: 0,
+      }
+    : null;
+  if (ob?.registered) registerTeammate();
+
+  function registerTeammate() {
+    const name = ob?.teammate ?? 'nora';
+    state.teammate = name;
+    if (ob?.mentor !== null) state.mentors[name] = ob?.mentor ?? 'jose';
+  }
+
+  /** @param {string} next */
+  const setOb = (next) => {
+    state.onboarding.state = next;
+    notify();
+  };
+
+  /** Decide the registration (the approver's tap), as configured. */
+  const decide = () => {
+    const o = state.onboarding;
+    if (o.state !== 'awaiting_approval') return;
+    const d = ob.decision ?? 'register';
+    if (d === 'register') {
+      registerTeammate();
+      o.registeredAt = Date.now();
+      setOb('registered');
+    } else if (d === 'refuse') {
+      o.tokenDead = true;
+      setOb('refused');
+    } else if (d === 'expire') {
+      o.tokenDead = true;
+      notify();
+    }
+  };
+
+  /** Token check per §C. @returns {string|null} error code, or null when valid for this route */
+  const tokenError = (token, route) => {
+    const o = state.onboarding;
+    if (!o || typeof token !== 'string' || token !== ob.token || o.tokenDead) return 'invalid_token';
+    if (o.state === 'registered') {
+      // After approval the token works for progress only, for 60 minutes.
+      if (route !== 'progress' || Date.now() - o.registeredAt > 60 * 60_000) return 'invalid_token';
+    }
+    if (o.state === 'refused') return 'invalid_token';
+    const login = ob.tailscaleLogin === undefined ? 'nora@example.com' : ob.tailscaleLogin;
+    if (login === null) return 'caller_unidentified';
+    if (o.boundLogin && o.boundLogin !== login) return 'invalid_token';
+    o.boundLogin = login;
+    return null;
+  };
+
+  const tokenStatus = { invalid_token: 401, caller_unidentified: 403 };
+
+  /** @param {http.IncomingMessage} req @param {http.ServerResponse} res @param {string} m @param {string} p */
+  async function onboardingRoute(req, res, m, p) {
+    const route = p.slice('/v1/onboarding/'.length);
+    if (m !== 'POST' || !['hello', 'progress', 'identity', 'status'].includes(route)) return error(res, 404, 'not_found', `${m} ${p}`);
+    const body = await readBody(req);
+    if (!body || typeof body !== 'object') return error(res, 400, 'invalid_request', 'body must be JSON');
+    const o = state.onboarding;
+    const te = tokenError(body.token, route);
+    if (te) return error(res, tokenStatus[te], te, te === 'invalid_token' ? 'This set-up token is not valid.' : 'The hub could not identify your Tailscale login.');
+    o.calls += 1;
+    if (ob.rateLimit && o.calls > ob.rateLimit) return error(res, 429, 'rate_limited', 'Too many calls for this token.');
+    const login = ob.tailscaleLogin === undefined ? 'nora@example.com' : ob.tailscaleLogin;
+
+    if (route === 'hello') {
+      o.helloCalls += 1;
+      if (o.state === 'invited') o.state = 'identified';
+      return send(res, 200, { state: o.state, display_name: ob.displayName ?? 'Nora', teammate: o.state === 'registered' ? state.teammate : null, tailscale_login: login });
+    }
+    if (route === 'progress') {
+      if (typeof body.step !== 'string' || !/^[a-z0-9-]{1,40}$/.test(body.step)) return error(res, 400, 'invalid_request', 'bad step');
+      if (!['started', 'done', 'blocked', 'skipped'].includes(body.status)) return error(res, 400, 'invalid_request', 'bad status');
+      if (body.note !== undefined && (typeof body.note !== 'string' || body.note.length > 300)) return error(res, 400, 'invalid_request', 'note must be at most 300 characters');
+      if (typeof body.client_request_id !== 'string' || !body.client_request_id) return error(res, 400, 'invalid_request', 'client_request_id is required');
+      if (o.seenRequestIds.has(body.client_request_id)) return send(res, 200, { ok: true, posted: false });
+      if (o.failProgress > 0) {
+        o.failProgress -= 1;
+        return error(res, 503, 'chat_unavailable', 'The hub is not connected to Slack right now.');
+      }
+      if (body.step === 'ready' && body.status === 'done') {
+        const standbyDelivered = [...state.questions.values()].some((q) => q.kind === 'standby_test' && q.asked_by === state.teammate && q.status === 'delivered');
+        if (o.state !== 'registered' || !standbyDelivered) return error(res, 409, 'not_ready', 'Not registered, or no delivered standby test yet.');
+      }
+      o.seenRequestIds.add(body.client_request_id);
+      o.progress.push({ step: body.step, status: body.status, note: body.note ?? null, client_request_id: body.client_request_id });
+      const name = ob.displayName ?? 'Nora';
+      o.posts.push(`Setup · ${name} · ${body.step}: ${body.status}${body.note ? ` — ${body.note}` : ''}`);
+      if (body.step === 'ready' && body.status === 'done') o.posts.push(`<@approver> ${name} is ready. Tap the headphones icon here to start a huddle.`);
+      return send(res, 201, { ok: true, posted: true });
+    }
+    if (route === 'identity') {
+      o.identityCalls += 1;
+      const id = { github_login: body.github_login, os: body.os, host: body.host, tools: body.tools };
+      if (typeof body.github_login !== 'string' || !body.github_login || typeof body.os !== 'string' || typeof body.host !== 'string' || !Array.isArray(body.tools)) {
+        return error(res, 400, 'invalid_request', 'github_login, os, host and tools are required');
+      }
+      if (o.identity) {
+        if (JSON.stringify(o.identity) !== JSON.stringify(id)) return error(res, 409, 'identity_conflict', 'A different identity was already reported for this token.');
+        return send(res, 200, { state: o.state });
+      }
+      o.identity = id;
+      setOb('awaiting_approval');
+      if (ob.decision !== 'manual') setTimeout(decide, ob.decideAfterMs ?? 50);
+      return send(res, 202, { state: 'awaiting_approval' });
+    }
+    // status: long poll
+    const wait = Number(body.wait ?? 0);
+    if (!Number.isFinite(wait) || wait < 0 || wait > 55) return error(res, 400, 'invalid_request', 'wait must be 0–55');
+    const start = o.state;
+    const reply = () => {
+      if (o.tokenDead && o.state !== 'refused') return error(res, 401, 'invalid_token', 'This set-up token is not valid.');
+      return send(res, 200, { state: o.state, teammate: o.state === 'registered' ? state.teammate : null });
+    };
+    if (wait === 0 || start === 'registered' || start === 'refused') return reply();
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      state.waiters.delete(check);
+      if (!res.writableEnded && !res.destroyed) reply();
+    };
+    const check = () => {
+      if (o.state !== start || o.tokenDead) finish();
+    };
+    const timer = setTimeout(finish, wait * 1000);
+    state.waiters.add(check);
+    req.on('close', () => {
+      done = true;
+      clearTimeout(timer);
+      state.waiters.delete(check);
+    });
+  }
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://stub');
     const m = req.method ?? 'GET';
     const p = url.pathname;
     const key = `${m} ${p.replace(/\/q_[^/]+/, '/{id}')}`;
     state.calls[key] = (state.calls[key] ?? 0) + 1;
+
+    if (opts.reachable && !opts.reachable()) {
+      req.socket.destroy(); // like a hub not yet reachable over Tailscale
+      return;
+    }
+
+    if (p.startsWith('/v1/onboarding/')) return onboardingRoute(req, res, m, p);
 
     if (m === 'GET' && p === '/v1/health') {
       return send(res, 200, { ok: true, version: '0.1.0-stub', chat: 'fake', chat_connected: state.chatConnected, interpreter: 'fake', identity: 'dev' });
@@ -335,6 +512,11 @@ export async function startStubHub(opts = {}) {
       state.questions.set(id, q);
       if (o.answer !== undefined) answer(q, o.answer, o.by);
       return id;
+    },
+    /** The approver's tap, for onboarding.decision 'manual'. @param {'register'|'refuse'|'expire'} d */
+    decideOnboarding(d) {
+      ob.decision = d;
+      decide();
     },
     /** Mark a question failed. */
     fail(id, message = 'card could not be posted') {
