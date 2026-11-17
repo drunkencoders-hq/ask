@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url';
 import { resolveHubUrl, ConfigError } from './config.js';
 import { PendingStore, pendingFilePath } from './pending.js';
 import { gitInfo, gitTop } from './gitinfo.js';
+import { checkCheckout } from './checkout.js';
 import { isRich, prepareRich } from './rich.js';
 import { NoticeError, runAnnounce } from './announce.js';
 import { formatAskUpdate } from './update.js';
@@ -52,11 +53,12 @@ Usage:
   ask agents-snippet                print the AGENTS.md text for projects not made from the starters
   ask playbook "<words>"            search the team playbook on this machine (read-only copy)
   ask knowledge sync | status       refresh / list the local copies of the team's knowledge repos
+  ask checkout-check --consent --repo <org>/sandbox [--projects-root <path>] [--checkout <path>]
   ask standby                       send a standby test through the hub
   ask announce --to name --file note.md [--dry-run] | --list | --template
 
 Exit codes: 0 answered and receipt recorded · 2 configuration or usage error ·
-3 still pending at --timeout · 4 hub unreachable · 5 hub refused ·
+3 still pending at --timeout · 4 hub unreachable · 5 refused ·
 6 question failed on the hub
 
 Rich answers (drafted by the mentor): diagrams are saved as Mermaid files in
@@ -247,12 +249,41 @@ async function runKnowledgeCommand(sub, args) {
   return EXIT.USAGE;
 }
 
+/** @param {string[]} args */
+async function runCheckoutCheck(args) {
+  let values;
+  try {
+    ({ values } = parseArgs({
+      args,
+      options: {
+        consent: { type: 'boolean' },
+        repo: { type: 'string' },
+        'projects-root': { type: 'string' },
+        checkout: { type: 'string' },
+      },
+    }));
+  } catch {
+    // parseArgs diagnostics may quote the supplied paths. Keep them local.
+    err('ask: usage: ask checkout-check --consent --repo <org>/sandbox [--projects-root <path>] [--checkout <path>]');
+    return EXIT.USAGE;
+  }
+  const result = await checkCheckout({
+    consent: values.consent,
+    repo: values.repo,
+    projectsRoot: values['projects-root'],
+    checkout: values.checkout,
+  });
+  process.stdout.write(JSON.stringify(result) + '\n');
+  return result.status === 'consent_required' ? EXIT.REFUSED : EXIT.OK;
+}
+
 /**
  * @param {string[]} argv
  * @returns {Promise<number>}
  */
 export async function main(argv) {
   const sub = argv[0];
+  if (sub === 'checkout-check') return runCheckoutCheck(argv.slice(1));
   if (sub === 'announce') {
     try {
       await runAnnounce(argv.slice(1));

@@ -215,6 +215,7 @@ ask --list              my questions still pending or answered-but-undelivered
 ask mcp                 run the MCP server on stdio
 ask --version | --help
 ask setup | doctor | standby     see "Setup commands" below
+ask checkout-check --consent --repo <org>/sandbox [--projects-root <path>] [--checkout <path>]
 ```
 
 - `repo` and `branch` default from the current directory's git (`origin`
@@ -343,6 +344,31 @@ path only). For projects that were not created from the team's starters,
 `ask agents-snippet` prints the same guidance (`docs/agents-snippet.md`) for
 an `AGENTS.md`.
 
+### Check the team sandbox locally
+
+Run `ask checkout-check --consent --repo <org>/sandbox` on the user's machine,
+after they explicitly agree to the check. Use the team's expected GitHub
+repository from trusted team context. If the user confirms their Projects
+folder, pass it as `--projects-root`; otherwise the check looks under
+`~/Desktop/Projects` and `~/Projects`. In each, it looks only at
+`drunkencoders/sandbox`. Pass `--checkout` for one additional location the
+user supplies. Both options take an absolute path or a path starting with `~/`.
+
+The check reads local Git metadata and returns JSON with `status`: `ready`,
+`elsewhere`, `missing`, `unknown`, or `consent_required`. `missing` includes
+only generic labels for the locations checked: `desktop_projects`,
+`home_projects`, `confirmed_projects`, or `supplied_checkout`. It does not
+mean the repo is absent elsewhere. Share only that result; keep path and
+remote details local. The check does not contact the hub or change files.
+The command exits 5 for `consent_required`, 2 for invalid arguments, and 0
+when it returns a checkout status.
+
+If `elsewhere`, guide the user through moving the existing checkout so their
+files and Git history stay intact. If `missing`, explain how to create the
+parent folders and offer to clone with their approval. If `unknown`, give a
+short next step for each possibility. The team folder gives them a consistent
+project folder to select when a setup tool asks for one.
+
 ### Exit codes
 
 | Code | Meaning |
@@ -406,7 +432,7 @@ that your AI assistant looks there **before** it asks your mentor, `ask` keeps a
 
 ## MCP server
 
-`ask mcp` serves two tools over stdio:
+`ask mcp` serves these tools over stdio:
 
 - `ask` — `{ question, repo?, project?, branch?, context?, wait_seconds? }`.
   The person answering is the user's mentor if they have one, otherwise
@@ -419,6 +445,11 @@ that your AI assistant looks there **before** it asks your mentor, `ask` keeps a
   earlier question, including one started in Slack; without an id, the
   same order as `ask --resume` (the result's last line says which it
   picked).
+- `ask_checkout_check` — `{ consent?, repo?, projects_root?, checkout? }`.
+  Same local sandbox check as the CLI. Set `consent: true` only after the
+  user explicitly agrees to this check and its locations. Its result has
+  the same status JSON and sends no receipt.
+- `playbook_search` — `{ query, limit? }`. Search the local team playbook.
 
 The receipt is sent after the tool result has been written to the client.
 Progress notifications are sent while waiting when the client asks for
