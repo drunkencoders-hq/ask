@@ -258,6 +258,12 @@ export function createClient(opts) {
       throw last;
     },
 
+    /** Notices queued for me (contract change 15); an older hub answers 404. */
+    notices: () => withRetries(() => request('GET', '/v1/notices/mine'), 'reading notices').then((r) => r.data),
+    /** The receipt for a notice shown to me. Idempotent. @param {string} id */
+    markNoticeSeen: (id) =>
+      withRetries(() => request('POST', `/v1/notices/${encodeURIComponent(id)}/seen`), 'marking notice seen').then((r) => r.data),
+
     /** @param {'pending'|'answered'|'all'} status */
     list: (status) =>
       withRetries(() => request('GET', `/v1/questions?mine=1&status=${status}`), 'listing').then((r) => r.data),

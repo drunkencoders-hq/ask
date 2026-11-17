@@ -14,6 +14,7 @@ import { isRich, prepareRich, SCRIPT_RULE } from './rich.js';
 import { realSys } from './setup/sys.js';
 import { KNOWLEDGE_INSTRUCTIONS, searchPlaybook, formatSearch, readManifest, syncSources } from './knowledge.js';
 import { formatAskUpdate, UPDATE_RULE } from './update.js';
+import { fetchNotices, formatNotices, sendSeen, NOTICE_INSTRUCTIONS, NOTICE_MCP_LINE } from './notices.js';
 import {
   VERSION,
   createClient,
@@ -65,7 +66,7 @@ export function buildServer(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const log = opts.log ?? ((m) => process.stderr.write(`ask-mcp: ${m}\n`));
   // `instructions` reach the assistant at session start (MCP initialize result; the SDK's ServerOptions).
-  const server = new McpServer({ name: 'ask', version: VERSION }, { instructions: `${KNOWLEDGE_INSTRUCTIONS}\n\n${UPDATE_RULE}` });
+  const server = new McpServer({ name: 'ask', version: VERSION }, { instructions: `${KNOWLEDGE_INSTRUCTIONS}\n\n${UPDATE_RULE}\n\n${NOTICE_MCP_LINE}` });
 
   /** requestId → receipt to send once the tool result has been written. */
   const afterResponse = new Map();
@@ -236,6 +237,34 @@ export function buildServer(opts = {}) {
         extra,
       );
       if (!args.id) r.content.push({ type: 'text', text: `(picked ${id}: ${target.reason})` });
+      return r;
+    }),
+  );
+
+  server.registerTool(
+    'ask_list',
+    {
+      title: 'List my open questions and notices from the team',
+      description:
+        'Lists the user\'s questions still pending or answered-but-undelivered, and the notices the team queued for the user. Call it at the start of a session. ' +
+        NOTICE_INSTRUCTIONS +
+        ' Showing the notices sends the hub a receipt that they were seen; that is not the user\'s Slack reaction.',
+      inputSchema: {},
+      annotations: { readOnlyHint: false, openWorldHint: false },
+    },
+    (_args, extra) => withHub(async (s) => {
+      const [p, a] = await Promise.all([s.client.list('pending'), s.client.list('answered')]);
+      const qs = [...(p.questions ?? []), ...(a.questions ?? [])].sort((x, y) => String(y.created_at).localeCompare(String(x.created_at)));
+      const lines = qs.map((q) => `${q.id}\t${q.status}\t${q.project ?? '-'}\t${q.created_at}\t${q.question_preview ?? ''}`);
+      const r = result(lines.length ? lines.join('\n') : 'No pending or undelivered questions.');
+      const queue = await fetchNotices(s.client, log);
+      const section = formatNotices(queue);
+      if (section) {
+        r.content.push({ type: 'text', text: `${NOTICE_INSTRUCTIONS}\n\n${section}` });
+        const shown = queue?.notices ?? [];
+        // The receipt goes out only after the result was written to the assistant.
+        afterResponse.set(extra?.requestId, () => sendSeen(s.client, shown, log));
+      }
       return r;
     }),
   );

@@ -12,6 +12,7 @@ import { checkCheckout } from './checkout.js';
 import { isRich, prepareRich } from './rich.js';
 import { NoticeError, runAnnounce } from './announce.js';
 import { formatAskUpdate } from './update.js';
+import { fetchNotices, formatNotices, sendSeen } from './notices.js';
 import path from 'node:path';
 import {
   VERSION,
@@ -44,7 +45,7 @@ Usage:
                       [--timeout seconds]   default 0 = wait until answered
                       [--json] [--no-save]
   ask --resume [id] [--no-save]   fetch the answer to an earlier question (default: most recent pending)
-  ask --list          my questions still pending or answered-but-undelivered
+  ask --list          my questions still pending or answered-but-undelivered, and notices from the team
   ask mcp             run the MCP server on stdio
   ask --version | --help
   ask setup --hub <url>             configure, sign in, register MCP, verify
@@ -357,8 +358,10 @@ export async function main(argv) {
         String(y.created_at).localeCompare(String(x.created_at)),
       );
       const local = store.all().filter((e) => !e.id || !qs.some((q) => q.id === e.id));
+      const queue = await fetchNotices(client, (m) => err(`ask: ${m}`));
+      const shown = queue?.notices ?? [];
       if (json) {
-        await printJson(client, { questions: qs, local_only: local }, 2);
+        await printJson(client, { questions: qs, local_only: local, ...(queue ? { notices: shown, ...(queue.more ? { more_notices: queue.more } : {}) } : {}) }, 2);
       } else {
         for (const q of qs) {
           // source and route columns only when the hub provides them (contract change 2).
@@ -370,7 +373,11 @@ export async function main(argv) {
           process.stdout.write(`${e.id ?? '(not sent)'}\tlocal\t${e.project ?? e.repo ?? ''}\t${e.created_at}\t${e.question.slice(0, 80)}\n`);
         }
         if (!qs.length && !local.length) err('No pending or undelivered questions.');
+        const section = formatNotices(queue);
+        if (section) process.stdout.write(`\n${section}\n`);
       }
+      // The receipt: only after the notices were printed. A failure is a warning and the notice stays queued.
+      await sendSeen(client, shown, (m) => err(`ask: ${m}`));
       return EXIT.OK;
     }
 

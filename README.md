@@ -211,7 +211,7 @@ ask "question text" [--repo org/name | --project slug] [--branch name]
                     [--timeout seconds]   default 0 = wait until answered
                     [--json]
 ask --resume [id]       fetch the answer to an earlier question (default: most recent pending)
-ask --list              my questions still pending or answered-but-undelivered
+ask --list              my questions still pending or answered-but-undelivered, and notices from the team
 ask mcp                 run the MCP server on stdio
 ask --version | --help
 ask setup | doctor | standby     see "Setup commands" below
@@ -285,6 +285,22 @@ tracks it as your question, and your AI session can pick up the answer:
   columns when the hub provides them.
 
 Nothing runs in the background to push answers: the session fetches them.
+
+### Notices
+
+When the team posts a notice for you in Slack, the hub also queues it for you.
+`ask --list` prints those under **Notices for you** (title, date, link, the
+four sections shortened at a word, and `UPDATE` when it carries a new `ask`
+version), then sends the hub a receipt that they were *seen*, so each shows
+once. If the receipt fails you get a warning and the notice shows again next
+time. `ask --list --json` adds them whole as `"notices": [...]`. An older hub
+without the queue prints nothing extra. The MCP tool `ask_list` returns the
+same notices as an extra text item that tells your assistant to explain them
+in plain words and to run a command only after you clearly say yes; `ask
+setup` adds "run `ask --list` at the start of a session and tell the user about
+any notices" to the rules block. `ask` never runs a command from a notice,
+and nothing polls: a running session learns of a notice at its next `ask
+--list`. *Seen* is not your ✅ in Slack; react there yourself where a post asks.
 
 ### Rich answers
 
@@ -445,6 +461,9 @@ that your AI assistant looks there **before** it asks your mentor, `ask` keeps a
   earlier question, including one started in Slack; without an id, the
   same order as `ask --resume` (the result's last line says which it
   picked).
+- `ask_list` — no arguments. Your pending and answered-but-undelivered
+  questions, plus the team's notices as a separate text item (see
+  "Notices"); sends the `seen` receipt after the result is returned.
 - `ask_checkout_check` — `{ consent?, repo?, projects_root?, checkout? }`.
   Same local sandbox check as the CLI. Set `consent: true` only after the
   user explicitly agrees to this check and its locations. Its result has

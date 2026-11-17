@@ -7,7 +7,16 @@ anything a teammate will see, a major for something that breaks.
 
 ## 0.4.0 - 2026-11-17
 
-For the announcer only (nothing changes for mentees; no update notice):
+What you will see:
+
+- **Notices for you.** `ask --list` and the new `ask_list` MCP tool show the team's
+  notices queued for you in the hub, and send a `seen` receipt so each shows once.
+  Your assistant is told to explain a notice in plain words and to run a command from
+  it only after you say yes; `ask` never runs one. `ask --list --json` adds
+  `"notices"`. `ask setup` adds a session-start line to the rules block. Seen is not
+  your ✅ in Slack. An older hub shows nothing new.
+
+For the announcer:
 
 - **Evening summary DM.** `ask announce --summary --file lines.txt [--day YYYY-MM-DD]
   [--dry-run] [--json]` sends up to five short lines to the announcer as one Slack DM

@@ -83,6 +83,10 @@ export async function startStubHub(opts = {}) {
     /** @type {Map<string, any>} client_request_id → notice */
     noticeIdem: new Map(),
     announceCalls: 0,
+    /** Contract change 15: per-teammate notice queue rows ({ notice, state }); GET /v1/notices/mine, POST /v1/notices/{id}/seen. */
+    /** @type {Map<string, { notice: any, state: 'queued'|'seen', seen_at?: string }[]>} */
+    queue: new Map(),
+    seenFail: 0,          // next N seen calls answer 503
     summaries: new Map(), // contract change 13: client_request_id → stored summary
     summaryDays: new Map(), // day → summary
     summaryPending: false, // true → store it but answer status "pending" (Slack not confirmed)
@@ -481,6 +485,28 @@ export async function startStubHub(opts = {}) {
       return m === 'GET' ? send(res, 200, { generated_at: new Date().toISOString(), ...state.attention }) : error(res, 404, 'not_found', `${m} ${p}`);
     }
 
+    // Contract change 15: the queue of notices for this caller only. An older hub answers 404.
+    if (p === '/v1/notices/mine' && m === 'GET') {
+      if (state.legacy) return error(res, 404, 'not_found', `${m} ${p}`);
+      const rows = (state.queue.get(me) ?? []).filter((r) => r.state === 'queued');
+      return send(res, 200, { notices: rows.slice(0, 20).map((r) => r.notice), ...(rows.length > 20 ? { more: rows.length - 20 } : {}) });
+    }
+    const seenMatch = /^\/v1\/notices\/([^/]+)\/seen$/.exec(p);
+    if (seenMatch && m === 'POST') {
+      if (state.legacy) return error(res, 404, 'not_found', `${m} ${p}`);
+      if (state.seenFail > 0) {
+        state.seenFail -= 1;
+        return error(res, 503, 'unavailable', 'try later');
+      }
+      const row = (state.queue.get(me) ?? []).find((r) => r.notice.id === decodeURIComponent(seenMatch[1]));
+      if (!row) return error(res, 404, 'not_found', 'no such notice');
+      if (row.state !== 'seen') {
+        row.state = 'seen';
+        row.seen_at = new Date().toISOString();
+      }
+      return send(res, 200, { id: row.notice.id, state: 'seen', seen_at: row.seen_at });
+    }
+
     if (m === 'GET' && p === '/v1/whoami') return send(res, 200, { teammate: me, via: 'dev' });
 
     // Contract change 8: which repos a client keeps a read-only copy of. Known teammates only; never a clone URL.
@@ -776,6 +802,18 @@ export async function startStubHub(opts = {}) {
         if (Date.now() - t0 > timeoutMs) throw new Error(`stub: ${id} never reached ${status}`);
         await new Promise((r) => setTimeout(r, 10));
       }
+    },
+    /** Queue a notice for a teammate (default: the caller). */
+    queueNotice(notice, teammate = state.teammate ?? 'nora') {
+      const n = {
+        id: `nt_${randomUUID().replace(/-/g, '').slice(0, 12)}`, title: 'ask 0.4.0', queued_at: '2026-11-17T20:00:00.000Z',
+        permalink: 'https://example.invalid/archives/C0NORAMENTOR/p1763300000000', what_changed: 'A new section.', why_you_act: 'Update when you can.',
+        what_to_run: 'Run the update command.', what_youre_learning: 'How notices work.', ask_version: null, update_command: null, kind: 'info', ...notice,
+      };
+      const rows = state.queue.get(teammate) ?? [];
+      rows.push({ notice: n, state: 'queued' });
+      state.queue.set(teammate, rows);
+      return n;
     },
     close() {
       for (const w of [...state.waiters]) w();
