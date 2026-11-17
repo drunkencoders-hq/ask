@@ -187,12 +187,12 @@ async function finishSetup(sys, hubUrl, R) {
   else await R.report('mcp', detected ? 'done' : 'skipped', detected ? undefined : 'no supported assistant found');
   step('Standby check');
   await R.report('standby', 'started');
-  const sc = await runStandby(sys, { hubUrl });
+  const sc = await runStandby(sys, { hubUrl, reportUpdates: false });
   await R.report('standby', sc === 0 ? 'done' : 'blocked', sc === 0 ? undefined : `exit ${sc}`);
   if (sc !== 0) return sc;
   // The team playbook: a read-only local copy. Never fails the set-up.
   step('Playbook');
-  await runKnowledgeStep(sys, hubUrl);
+  await runKnowledgeStep(sys, hubUrl, { fromSetup: true });
   if (failed.length) {
     sys.err(`ask setup: FAILED: MCP registration failed for ${failed.join(', ')}. Fix the error above, then paste the same command again.`);
     return 1;
@@ -255,12 +255,12 @@ async function setup(sys, hubArg) {
 
   // 7. Standby check.
   step('Standby check');
-  const sc = await runStandby(sys, { hubUrl });
+  const sc = await runStandby(sys, { hubUrl, reportUpdates: false });
   if (sc !== 0) return sc;
 
   // 8. The team playbook: a read-only local copy. Never fails the set-up.
   step('Playbook');
-  await runKnowledgeStep(sys, hubUrl);
+  await runKnowledgeStep(sys, hubUrl, { fromSetup: true });
   if (failedAssistants.length) {
     sys.err(`ask setup: FAILED: MCP registration failed for ${failedAssistants.join(', ')}. Fix the error above and run ask setup again.`);
     return 1;

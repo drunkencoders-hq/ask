@@ -101,7 +101,7 @@ async function rehearse(name) {
       await client.connect(transport);
       const instr = client.getInstructions() ?? '';
       await client.close();
-      const instrOk = instr === KNOWLEDGE_INSTRUCTIONS && /search the team playbook with `playbook_search`/.test(instr);
+      const instrOk = instr.startsWith(`${KNOWLEDGE_INSTRUCTIONS}\n\n`) && /search the team playbook with `playbook_search`/.test(instr);
       if (!instrOk) problems.push('instructions missing from the MCP server');
       summary = `KNOWLEDGE OK: ${cloned.length} sources cloned read-only, search found ${found} of ${expect.length} expected entries, instructions ${instrOk ? 'present' : 'MISSING'}, ${pushes} pushes possible`;
     }

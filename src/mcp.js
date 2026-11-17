@@ -12,6 +12,7 @@ import { gitInfo, gitTop } from './gitinfo.js';
 import { isRich, prepareRich, SCRIPT_RULE } from './rich.js';
 import { realSys } from './setup/sys.js';
 import { KNOWLEDGE_INSTRUCTIONS, searchPlaybook, formatSearch, readManifest, syncSources } from './knowledge.js';
+import { formatAskUpdate, UPDATE_RULE } from './update.js';
 import {
   VERSION,
   createClient,
@@ -63,7 +64,7 @@ export function buildServer(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const log = opts.log ?? ((m) => process.stderr.write(`ask-mcp: ${m}\n`));
   // `instructions` reach the assistant at session start (MCP initialize result; the SDK's ServerOptions).
-  const server = new McpServer({ name: 'ask', version: VERSION }, { instructions: KNOWLEDGE_INSTRUCTIONS });
+  const server = new McpServer({ name: 'ask', version: VERSION }, { instructions: `${KNOWLEDGE_INSTRUCTIONS}\n\n${UPDATE_RULE}` });
 
   /** requestId → receipt to send once the tool result has been written. */
   const afterResponse = new Map();
@@ -71,7 +72,7 @@ export function buildServer(opts = {}) {
   function setup() {
     const { hubUrl } = resolveHubUrl();
     const store = new PendingStore(pendingFilePath());
-    const client = createClient({ hubUrl, via: 'mcp', log });
+    const client = createClient({ hubUrl, via: 'mcp', log, updateState: opts.sys });
     return { store, client };
   }
 
@@ -159,6 +160,21 @@ export function buildServer(opts = {}) {
     return result(`ask failed: ${/** @type {Error} */ (e)?.message ?? e}`, true);
   }
 
+  /** @param {(s: ReturnType<typeof setup>) => Promise<import('@modelcontextprotocol/sdk/types.js').CallToolResult>} run */
+  async function withHub(run) {
+    let s;
+    let r;
+    try {
+      s = setup();
+      r = await run(s);
+    } catch (e) {
+      r = errorResult(e);
+    }
+    const update = await s?.client.askUpdate();
+    if (update) r.content.push({ type: 'text', text: `${formatAskUpdate(update)}\n\n${UPDATE_RULE}` });
+    return r;
+  }
+
   server.registerTool(
     'ask',
     {
@@ -173,32 +189,27 @@ export function buildServer(opts = {}) {
         wait_seconds: z.number().int().min(0).max(MAX_WAIT).optional().describe(`how long to wait (default ${DEFAULT_WAIT}, max ${MAX_WAIT})`),
       },
     },
-    async (args, extra) => {
-      try {
-        const s = setup();
-        let { repo, branch } = args;
-        if (!repo && !args.project) {
-          const g = await gitInfo(cwd);
-          if (!g.repo) {
-            return result(
-              'Cannot tell which project this is: the server\'s working directory is not a git repository with an origin remote. Pass `repo` (org/name) or `project`.',
-              true,
-            );
-          }
-          repo = g.repo;
-          branch = branch ?? g.branch ?? undefined;
+    (args, extra) => withHub(async (s) => {
+      let { repo, branch } = args;
+      if (!repo && !args.project) {
+        const g = await gitInfo(cwd);
+        if (!g.repo) {
+          return result(
+            'Cannot tell which project this is: the server\'s working directory is not a git repository with an origin remote. Pass `repo` (org/name) or `project`.',
+            true,
+          );
         }
-        const entry = await submitQuestion(
-          s.client,
-          s.store,
-          { question: args.question, repo, project: args.project, branch, context: args.context },
-          extra.signal,
-        );
-        return await waitAndReport(s, /** @type {any} */ (entry), clampWait(args.wait_seconds), extra);
-      } catch (e) {
-        return errorResult(e);
+        repo = g.repo;
+        branch = branch ?? g.branch ?? undefined;
       }
-    },
+      const entry = await submitQuestion(
+        s.client,
+        s.store,
+        { question: args.question, repo, project: args.project, branch, context: args.context },
+        extra.signal,
+      );
+      return await waitAndReport(s, /** @type {any} */ (entry), clampWait(args.wait_seconds), extra);
+    }),
   );
 
   server.registerTool(
@@ -211,26 +222,21 @@ export function buildServer(opts = {}) {
         wait_seconds: z.number().int().min(0).max(MAX_WAIT).optional().describe(`how long to wait (default ${DEFAULT_WAIT}, max ${MAX_WAIT})`),
       },
     },
-    async (args, extra) => {
-      try {
-        const s = setup();
-        const target = await findResumeTarget(s.client, s.store, args.id);
-        if (!target) return result('Nothing to resume: no pending or undelivered questions on this machine or the hub.', true);
-        let entry = target.entry;
-        if (!target.id && entry) entry = await submitQuestion(s.client, s.store, entry, extra.signal);
-        const id = /** @type {string} */ (entry?.id ?? target.id);
-        const r = await waitAndReport(
-          s,
-          { id, client_request_id: entry?.client_request_id ?? target.client_request_id },
-          clampWait(args.wait_seconds),
-          extra,
-        );
-        if (!args.id) r.content.push({ type: 'text', text: `(picked ${id}: ${target.reason})` });
-        return r;
-      } catch (e) {
-        return errorResult(e);
-      }
-    },
+    (args, extra) => withHub(async (s) => {
+      const target = await findResumeTarget(s.client, s.store, args.id);
+      if (!target) return result('Nothing to resume: no pending or undelivered questions on this machine or the hub.', true);
+      let entry = target.entry;
+      if (!target.id && entry) entry = await submitQuestion(s.client, s.store, entry, extra.signal);
+      const id = /** @type {string} */ (entry?.id ?? target.id);
+      const r = await waitAndReport(
+        s,
+        { id, client_request_id: entry?.client_request_id ?? target.client_request_id },
+        clampWait(args.wait_seconds),
+        extra,
+      );
+      if (!args.id) r.content.push({ type: 'text', text: `(picked ${id}: ${target.reason})` });
+      return r;
+    }),
   );
 
   server.registerTool(

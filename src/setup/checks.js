@@ -35,11 +35,10 @@ export async function checkHealth(sys, hubUrl) {
 }
 
 /**
- * @param {string} hubUrl
+ * @param {string} hubUrl @param {ReturnType<typeof createClient>} [client]
  * @returns {Promise<{ ok: true, teammate: string } | { ok: false, code: string, message: string }>}
  */
-export async function checkWhoami(hubUrl) {
-  const client = createClient({ hubUrl, via: 'cli', retryDelaysMs: [500] });
+export async function checkWhoami(hubUrl, client = createClient({ hubUrl, via: 'cli', retryDelaysMs: [500] })) {
   try {
     const r = await client.whoami();
     return { ok: true, teammate: r.teammate };

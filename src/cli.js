@@ -9,6 +9,8 @@ import { resolveHubUrl, ConfigError } from './config.js';
 import { PendingStore, pendingFilePath } from './pending.js';
 import { gitInfo, gitTop } from './gitinfo.js';
 import { isRich, prepareRich } from './rich.js';
+import { NoticeError, runAnnounce } from './announce.js';
+import { formatAskUpdate } from './update.js';
 import path from 'node:path';
 import {
   VERSION,
@@ -51,6 +53,7 @@ Usage:
   ask playbook "<words>"            search the team playbook on this machine (read-only copy)
   ask knowledge sync | status       refresh / list the local copies of the team's knowledge repos
   ask standby                       send a standby test through the hub
+  ask announce --to name --file note.md [--dry-run] | --list | --template
 
 Exit codes: 0 answered and receipt recorded · 2 configuration or usage error ·
 3 still pending at --timeout · 4 hub unreachable · 5 hub refused ·
@@ -112,7 +115,7 @@ function parseTimeout(s) {
  * @param {unknown} e
  */
 function fail(e) {
-  if (e instanceof UsageError || e instanceof ConfigError) {
+  if (e instanceof UsageError || e instanceof NoticeError || e instanceof ConfigError) {
     err(`ask: ${e.message}`);
     if (e instanceof UsageError) err('Run `ask --help` for usage.');
     return EXIT.USAGE;
@@ -157,13 +160,13 @@ async function waitPrintReceipt(client, store, entry, o) {
   });
   const q = result.question;
   if (!result.done) {
-    if (o.json) process.stdout.write(JSON.stringify({ id: entry.id, status: q?.status ?? 'pending' }) + '\n');
+    if (o.json) await printJson(client, { id: entry.id, status: q?.status ?? 'pending' });
     err(`Still waiting for an answer to ${entry.id}. Fetch it later with:\n  ask --resume ${entry.id}`);
     return EXIT.TIMEOUT;
   }
   if (q.status === 'failed') {
     const msg = q.error?.message ?? q.error?.code ?? 'no detail';
-    if (o.json) process.stdout.write(JSON.stringify({ id: q.id, status: 'failed', error: q.error }) + '\n');
+    if (o.json) await printJson(client, { id: q.id, status: 'failed', error: q.error });
     err(`ask: question ${q.id} failed on the hub: ${msg}`);
     if (entry.client_request_id) store.remove(entry.client_request_id);
     return EXIT.FAILED;
@@ -182,12 +185,12 @@ async function waitPrintReceipt(client, store, entry, o) {
       })
     : null;
   if (o.json) {
-    process.stdout.write(
+    await printJson(client,
       // route, answerer and comments are passed through verbatim when the hub sends them (contract change 2).
-      JSON.stringify({
+      {
         id: q.id, status: 'answered', project: q.project, answer: q.answer, card: q.card, route: q.route, answerer: q.answerer, comments: q.comments,
         ...(rich ? { saved: rich.saved, attachments: rich.downloads.map((d) => ({ id: d.att.id, filename: d.att.filename, ok: d.data !== null, error: d.error })) } : {}),
-      }) + '\n',
+      },
     );
   } else {
     process.stdout.write((rich ? rich.text : formatAnswer(q)) + '\n');
@@ -201,6 +204,12 @@ async function waitPrintReceipt(client, store, entry, o) {
     return r.error instanceof HubError ? EXIT.REFUSED : EXIT.UNREACHABLE;
   }
   return EXIT.OK;
+}
+
+/** @param {ReturnType<typeof createClient>} client @param {Record<string, unknown>} data @param {number} [spacing] */
+async function printJson(client, data, spacing) {
+  const update = await client.askUpdate();
+  process.stdout.write(JSON.stringify({ ...data, ...(update ? { ask_update: update } : {}) }, null, spacing) + '\n');
 }
 
 /**
@@ -244,6 +253,14 @@ async function runKnowledgeCommand(sub, args) {
  */
 export async function main(argv) {
   const sub = argv[0];
+  if (sub === 'announce') {
+    try {
+      await runAnnounce(argv.slice(1));
+      return EXIT.OK;
+    } catch (e) {
+      return fail(e);
+    }
+  }
   if (sub === 'knowledge' || sub === 'playbook') return runKnowledgeCommand(sub, argv.slice(1));
   if (sub === 'agents-snippet' && argv.length === 1) {
     process.stdout.write(fs.readFileSync(new URL('../docs/agents-snippet.md', import.meta.url), 'utf8'));
@@ -270,6 +287,8 @@ export async function main(argv) {
   const ac = new AbortController();
   /** @type {string|null} */
   let currentId = null;
+  /** @type {ReturnType<typeof createClient>|undefined} */
+  let client;
   const onSigint = () => {
     ac.abort();
     err(
@@ -296,7 +315,7 @@ export async function main(argv) {
 
     const { hubUrl } = resolveHubUrl();
     const store = new PendingStore(pendingFilePath());
-    const client = createClient({ hubUrl, via: 'cli', log: (m) => err(`ask: ${m}`) });
+    client = createClient({ hubUrl, via: 'cli', log: (m) => err(`ask: ${m}`), onAskUpdate: (update) => err(formatAskUpdate(update)) });
     process.on('SIGINT', onSigint);
 
     if (values.list) {
@@ -307,7 +326,7 @@ export async function main(argv) {
       );
       const local = store.all().filter((e) => !e.id || !qs.some((q) => q.id === e.id));
       if (json) {
-        process.stdout.write(JSON.stringify({ questions: qs, local_only: local }, null, 2) + '\n');
+        await printJson(client, { questions: qs, local_only: local }, 2);
       } else {
         for (const q of qs) {
           // source and route columns only when the hub provides them (contract change 2).
@@ -400,6 +419,7 @@ export async function main(argv) {
     return fail(e);
   } finally {
     process.off('SIGINT', onSigint);
+    await client?.askUpdate();
   }
 }
 

@@ -452,10 +452,40 @@ and `ask --resume` retries it.
   for something that breaks. Every release bumps the version and adds its entry.
 - **Process:** the lead tags each release `v<semver>` when pushing and posts the
   update notice for it (`ask announce`, below).
-- **Old clients.** `ask` 0.1.0 never sent its version and never warns. The first
+- **Old clients.** `ask` 0.1.0 sent no version headers and shows no update warning. The first
   notice after 0.2.0 (the one for rich answers) therefore reaches a teammate as a
   Slack message only; the bot's ✅ appears after she has updated and made her
   next call.
+
+### When an update is available
+
+The CLI shows one warning on stderr during a regular `ask` call when the hub
+has announced a newer version. The MCP tool includes the same warning in its
+result, and `ask doctor` shows it as a warning alongside its usual checks.
+With `--json`, CLI results include `ask_update` with `current`, `latest`,
+`command` and `notice` when an update is available. The notice explains why the
+update matters. `ask` displays the command for you. You can run it yourself or
+ask your assistant to run it once you've agreed to the update.
+
+### Post an update notice
+
+The configured announcer uses their own Tailscale identity. `ask announce
+--template` prints the Markdown headings for the title and four required
+sections. Fill them in, then preview and post the notice from the same file.
+
+```sh
+ask announce --to nora --file note.md --ask-version 0.2.0 --dry-run
+ask announce --to nora --file note.md --ask-version 0.2.0
+ask announce --list
+```
+
+Add `--to all` for the team channel and `--mention nora` to notify that person.
+Pass `--update-command '<command>'` to include the installation command in the
+version warning. `--dry-run --json` prints the exact request body offline.
+Successful posts print the Slack permalinks. If posting is interrupted, repeat
+the same command with the same file and flags to resume without duplicate
+posts. `--list` shows notices and which recipients are current, behind or
+unknown. Use `--json` for the hub's structured results.
 
 ## Development
 
@@ -469,6 +499,7 @@ npm run demo:slack-start  # bare `ask --resume` picks up a question started in S
 npm run demo:rich         # a drafted answer: script as a proposal, diagrams and images saved
 npm run rehearse:knowledge            # the playbook copy: clone read-only, search, instructions (stubs)
 npm run rehearse:knowledge -- all     # + no access, a failed pull, a stale copy
+npm run rehearse:update               # version headers and warnings against a stub hub
 npm run rehearse:bootstrap            # bootstrap.sh for real, piped like curl|bash, stubs only
 npm run rehearse:bootstrap -- all     # + installed, refused, expired, unreachable, progress-fail
 ```

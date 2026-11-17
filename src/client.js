@@ -4,10 +4,16 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import { randomUUID, createHash } from 'node:crypto';
+import { trackAskUpdate } from './update.js';
 
 export const VERSION = JSON.parse(
   fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
 ).version;
+
+/** @param {'cli'|'mcp'} via */
+export function versionHeaders(via) {
+  return { 'X-Ask-Version': VERSION, 'X-Ask-Client': via };
+}
 
 /** Codes the hub uses to refuse a question; shown verbatim, exit 5. */
 export const REFUSAL_CODES = new Set([
@@ -67,7 +73,9 @@ function sleep(ms, signal) {
 
 /**
  * @param {{ hubUrl: string, via: 'cli'|'mcp', log?: (msg: string) => void, fetchImpl?: typeof fetch,
- *           retryDelaysMs?: number[], maxBackoffMs?: number, tools?: string[], attachmentRetryMs?: number }} opts
+ *           retryDelaysMs?: number[], maxBackoffMs?: number, tools?: string[], attachmentRetryMs?: number,
+ *           updateState?: import('./config.js').Platform & { fs?: typeof fs },
+ *           onAskUpdate?: (update: import('./update.js').AskUpdate) => void }} opts
  */
 export function createClient(opts) {
   const base = opts.hubUrl.replace(/\/+$/, '');
@@ -75,6 +83,14 @@ export function createClient(opts) {
   const log = opts.log ?? (() => {});
   const firstRetries = opts.retryDelaysMs ?? [500, 1000, 2000];
   const maxBackoff = opts.maxBackoffMs ?? 30_000;
+  const headers = versionHeaders(opts.via);
+  const update = trackAskUpdate({
+    hubUrl: base,
+    current: VERSION,
+    details: () => request('GET', '/v1/ask-version', undefined, { timeoutMs: 2000 }).then((r) => r.data),
+    state: opts.updateState,
+    onUpdate: opts.onAskUpdate,
+  });
   const clientInfo = {
     name: 'ask',
     version: VERSION,
@@ -98,10 +114,11 @@ export function createClient(opts) {
     try {
       res = await doFetch(base + path, {
         method,
-        headers: body !== undefined ? { 'content-type': 'application/json; charset=utf-8' } : {},
+        headers: body !== undefined ? { ...headers, 'content-type': 'application/json; charset=utf-8' } : headers,
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: ctrl.signal,
       });
+      if (path !== '/v1/ask-version') update.observe(res.headers.get('X-Ask-Latest'));
       const text = await res.text();
       let data = null;
       if (text) {
@@ -152,10 +169,14 @@ export function createClient(opts) {
   return {
     hubUrl: base,
     clientInfo,
+    askUpdate: update.get,
     health: () => withRetries(() => request('GET', '/v1/health'), 'health').then((r) => r.data),
     whoami: () => withRetries(() => request('GET', '/v1/whoami'), 'whoami').then((r) => r.data),
     /** Knowledge sources to keep a read-only copy of (contract change 8); an older hub answers 404. */
     knowledge: () => withRetries(() => request('GET', '/v1/knowledge'), 'knowledge').then((r) => r.data),
+    /** @param {Record<string, unknown>} body */
+    announce: (body) => withRetries(() => request('POST', '/v1/announce', body), 'posting notice').then((r) => r.data),
+    listNotices: () => withRetries(() => request('GET', '/v1/announce'), 'listing notices').then((r) => r.data),
 
     /**
      * POST /v1/questions. Retried with the same client_request_id, so a lost
@@ -200,7 +221,8 @@ export function createClient(opts) {
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 60_000);
         try {
-          const res = await doFetch(url, { method: 'GET', signal: ctrl.signal });
+          const res = await doFetch(url, { method: 'GET', headers, signal: ctrl.signal });
+          update.observe(res.headers.get('X-Ask-Latest'));
           if (!res.ok) {
             const text = await res.text().catch(() => '');
             let code = '';

@@ -3,6 +3,7 @@
 // (brief 26). It never fails the caller: no access, no `gh`, no network, an old
 // hub, a failed pull: each is one line and the set-up carries on.
 import { createClient } from '../client.js';
+import { formatAskUpdate, UPDATE_RULE } from '../update.js';
 import { fetchSources, syncSources, syncLine, readManifest, knowledgeDir, KNOWLEDGE_RULES_TEXT } from '../knowledge.js';
 import { ASSISTANTS } from './assistants/index.js';
 import { rulesFile, installRules, removeRules } from './rules.js';
@@ -29,9 +30,10 @@ export function installAssistantRules(sys) {
         sys.err(`warn  ${a.label}: could not write the playbook rule (${/** @type {Error} */ (e).message}); carrying on`);
       }
     } else if (a.id === 'cursor') {
-      sys.err('Cursor keeps its user-level rules only in its settings (Settings → Rules), so ask cannot write them. To make it search the playbook first, paste this there once:');
+      sys.err('Cursor keeps its user-level rules only in its settings (Settings → Rules). Paste these there once:');
       sys.err('');
       sys.err(`  ${KNOWLEDGE_RULES_TEXT}`);
+      sys.err(`  ${UPDATE_RULE}`);
       sys.err('');
     }
   }
@@ -39,7 +41,7 @@ export function installAssistantRules(sys) {
 
 /**
  * @param {import('./sys.js').Sys} sys @param {string|null} hubUrl
- * @param {{ pullOnly?: boolean, quiet?: boolean }} [o]
+ * @param {{ pullOnly?: boolean, quiet?: boolean, fromSetup?: boolean }} [o]
  * @returns {Promise<{ results: Awaited<ReturnType<typeof syncSources>>, note: string|null }>}
  */
 export async function runKnowledgeStep(sys, hubUrl, o = {}) {
@@ -48,8 +50,10 @@ export async function runKnowledgeStep(sys, hubUrl, o = {}) {
     let sources = [];
     let note = null;
     if (hubUrl && !o.pullOnly) {
-      const client = createClient({ hubUrl, via: 'cli', retryDelaysMs: [500] });
+      const client = createClient({ hubUrl, via: 'cli', retryDelaysMs: [500], updateState: sys });
       const r = await fetchSources(client);
+      const update = !o.quiet && await client.askUpdate();
+      if (update) sys.err(formatAskUpdate(update));
       if (r.ok) sources = r.sources;
       else {
         note = `the playbook sources could not be listed (${r.reason})`;
@@ -65,11 +69,13 @@ export async function runKnowledgeStep(sys, hubUrl, o = {}) {
       if (note) sys.err(`warn  playbook: ${note}; refreshed the copies already here`);
       for (const r of results) sys.err(syncLine(r));
     }
-    if (!o.pullOnly && results.some((r) => r.state === 'cloned' || r.state === 'updated' || r.state === 'current')) installAssistantRules(sys);
+    if (!o.fromSetup && !o.pullOnly && results.some((r) => r.state === 'cloned' || r.state === 'updated' || r.state === 'current')) installAssistantRules(sys);
     return { results, note };
   } catch (e) {
     if (!o.quiet) sys.err(`warn  playbook: skipped (${/** @type {Error} */ (e).message}); carrying on`);
     return { results: [], note: String(/** @type {Error} */ (e).message) };
+  } finally {
+    if (o.fromSetup) installAssistantRules(sys);
   }
 }
 

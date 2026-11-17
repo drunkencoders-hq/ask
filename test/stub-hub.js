@@ -18,6 +18,12 @@ const TERMINAL_WAKE = new Set(['answered', 'delivered', 'failed']);
  *   legacy?: boolean,                  // answer in the pre-change-2 shape (also: no contract-5 answer fields) (no route/answerer/comments/source on lists)
  *   reachable?: () => boolean,         // false → every connection is dropped (hub not reachable yet)
  *   onboarding?: OnboardingOptions,    // contract change 4 (brief 08a §D)
+ *   askLatest?: string|null,           // contract changes 9, 10: the announced version (X-Ask-Latest on authenticated responses, GET /v1/ask-version); legacy hub: none
+ *   updateCommand?: string|null, noticeLink?: string|null,
+ *   announcer?: string,                // contract change 11: who may POST/GET /v1/announce (default 'jose')
+ *   teammates?: string[],              // known teammates for announce audiences (default jose, nora, grish)
+ *   channelAll?: boolean,              // `channels.all` configured (default true)
+ *   noTicks?: boolean,                 // health: notice_ticks "off"
  *   knowledge?: { name: string, repo: string, ref?: string, kind: string }[],  // contract change 8: GET /v1/knowledge (default: none; an older hub 404s when legacy)
  * }} StubOptions
  *
@@ -60,6 +66,22 @@ export async function startStubHub(opts = {}) {
     files: new Map(),
     attachmentCalls: 0,
     failAttachments: 0, // next N attachment downloads → socket destroyed
+    /** contract changes 9–11 */
+    askLatest: opts.legacy ? null : (opts.askLatest ?? null),
+    updateCommand: opts.updateCommand ?? null,
+    noticeLink: opts.noticeLink ?? null,
+    releasedAt: /** @type {string|null} */ (null),
+    announcer: opts.announcer ?? 'jose',
+    knownTeammates: opts.teammates ?? ['jose', 'nora', 'grish'],
+    /** teammate → last version seen (from X-Ask-Version or the body's client.version) */
+    seen: /** @type {Record<string, string>} */ ({}),
+    /** every request: method, path, and the version headers it carried */
+    requests: /** @type {{ method: string, path: string, version: string|undefined, client: string|undefined }[]} */ ([]),
+    /** @type {Map<string, any>} */
+    notices: new Map(),
+    /** @type {Map<string, any>} client_request_id → notice */
+    noticeIdem: new Map(),
+    announceCalls: 0,
     /** fault injection */
     dropNextCreateResponses: 0, // process the create (new or repeated), then destroy the socket
     failReceipts: 0, // next N receipts → socket destroyed
@@ -330,12 +352,78 @@ export async function startStubHub(opts = {}) {
     });
   }
 
+  const SECRET = /xox[abposr]-|\bsk-[A-Za-z0-9]|\bghp_[A-Za-z0-9]|-----BEGIN [A-Z ]*PRIVATE KEY-----/;
+  const semverGt = (a, b) => a.split('.').map(Number).reduce((r, n, i) => r || n - Number(b.split('.')[i]), 0) > 0;
+  const semverGe = (a, b) => a === b || semverGt(a, b);
+
+  /** @param {http.IncomingMessage} req @param {http.ServerResponse} res @param {string} m @param {string} me */
+  async function announceRoute(req, res, m, me) {
+    if (me !== state.announcer) return error(res, 403, 'not_announcer', 'Only the announcer may post or list update notices.');
+    const audienceOf = (n) => {
+      const names = n.to.flatMap((t) => (t === 'all' ? state.knownTeammates.filter((x) => x !== n.announcer) : [t]));
+      return [...new Set(names)].map((name) => {
+        const seen = state.seen[name];
+        return { teammate: name, status: !n.ask_version ? 'unknown' : !seen ? 'unknown' : semverGe(seen, n.ask_version) ? 'current' : 'behind', seen: seen ?? null };
+      });
+    };
+    if (m === 'GET') {
+      const notices = [...state.notices.values()].slice(-50).reverse().map((n) => ({
+        id: n.id, title: n.title, ask_version: n.ask_version ?? null, to: n.to, announcer: n.announcer, created_at: n.created_at, status: 'posted',
+        channels: n.posted.map((x) => ({ channel: x.channel, permalink: x.permalink, ticked: false })), audience: audienceOf(n),
+      }));
+      return send(res, 200, { notices });
+    }
+    if (m !== 'POST') return error(res, 404, 'not_found', `${m} /v1/announce`);
+    const b = await readBody(req);
+    state.announceCalls += 1;
+    const bad = (msg, code = 'invalid_request') => error(res, 400, code, msg);
+    if (!b || typeof b !== 'object' || typeof b.client_request_id !== 'string' || !b.client_request_id) return bad('client_request_id is required');
+    if (state.noticeIdem.has(b.client_request_id)) {
+      const n = state.noticeIdem.get(b.client_request_id);
+      return send(res, 200, { id: n.id, posted: n.posted });
+    }
+    if (!Array.isArray(b.to) || b.to.length < 1 || b.to.length > 3 || !b.to.every((x) => typeof x === 'string')) return bad('to must be 1–3 names');
+    if (typeof b.title !== 'string' || !b.title.trim() || b.title.length > 100) return bad('title must be 1–100 characters');
+    for (const k of ['what_changed', 'why_you_act', 'what_to_run', 'what_youre_learning']) {
+      if (typeof b[k] !== 'string' || !b[k].trim()) return bad(`${k} is required and must not be empty`);
+      if (b[k].length > 2500) return bad(`${k} is longer than 2,500 characters`);
+    }
+    for (const k of ['title', 'what_changed', 'why_you_act', 'what_to_run', 'what_youre_learning', 'update_command']) if (typeof b[k] === 'string' && SECRET.test(b[k])) return bad(`${k} looks like it contains a secret`);
+    if (b.ask_version !== undefined && !/^\d+\.\d+\.\d+$/.test(String(b.ask_version))) return bad('ask_version must be x.y.z');
+    if (b.update_command !== undefined && (b.ask_version === undefined || typeof b.update_command !== 'string' || b.update_command.length > 500)) return bad('update_command needs ask_version and at most 500 characters');
+    for (const t of b.to) {
+      if (t === 'all') {
+        if (opts.channelAll === false) return bad('channels.all is not configured', 'no_channel');
+      } else if (!state.knownTeammates.includes(t)) return bad(`unknown teammate ${t}`, 'unknown_teammate');
+    }
+    if (b.ask_version && state.askLatest && !b.force && !semverGt(b.ask_version, state.askLatest) && b.ask_version !== state.askLatest) {
+      return error(res, 409, 'version_backward', `ask_version ${b.ask_version} is older than the announced ${state.askLatest}; send force: true to move it back.`);
+    }
+    const id = `nt_${randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    const posted = b.to.map((t, i) => {
+      const channel = t === 'all' ? 'C0ALLTEAM' : `C0${t.toUpperCase()}MENTOR`;
+      const ts = `1763300000.00${i}`;
+      return { channel, ts, permalink: `https://example.invalid/archives/${channel}/p${ts.replace('.', '')}` };
+    });
+    const notice = { id, title: b.title, ask_version: b.ask_version, to: b.to, announcer: me, created_at: new Date().toISOString(), posted, body: b };
+    state.notices.set(id, notice);
+    state.noticeIdem.set(b.client_request_id, notice);
+    if (b.ask_version) {
+      state.askLatest = b.ask_version;
+      state.updateCommand = b.update_command ?? null;
+      state.noticeLink = posted[0].permalink;
+      state.releasedAt = notice.created_at;
+    }
+    return send(res, 201, { id, posted });
+  }
+
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://stub');
     const m = req.method ?? 'GET';
     const p = url.pathname;
     const key = `${m} ${p.replace(/\/q_[^/]+/, '/{id}')}`;
     state.calls[key] = (state.calls[key] ?? 0) + 1;
+    state.requests.push({ method: m, path: p, version: /** @type {any} */ (req.headers['x-ask-version']), client: /** @type {any} */ (req.headers['x-ask-client']) });
 
     if (opts.reachable && !opts.reachable()) {
       req.socket.destroy(); // like a hub not yet reachable over Tailscale
@@ -345,10 +433,21 @@ export async function startStubHub(opts = {}) {
     if (p.startsWith('/v1/onboarding/')) return onboardingRoute(req, res, m, p);
 
     if (m === 'GET' && p === '/v1/health') {
-      return send(res, 200, { ok: true, version: '0.1.0-stub', chat: 'fake', chat_connected: state.chatConnected, interpreter: 'fake', identity: 'dev' });
+      return send(res, 200, { ok: true, version: '0.1.0-stub', chat: 'fake', chat_connected: state.chatConnected, interpreter: 'fake', identity: 'dev', ...(state.legacy ? {} : { notice_ticks: opts.noTicks ? 'off' : 'on' }) });
     }
     if (!state.teammate) return error(res, 403, 'unknown_caller', 'This machine is not a known teammate on the tailnet.');
     const me = state.teammate;
+    // Contract changes 9, 10: the version this caller runs is remembered (a well-formed header only), and every
+    // authenticated response carries the announced one.
+    const hv = /** @type {any} */ (req.headers['x-ask-version']);
+    if (typeof hv === 'string' && /^\d+\.\d+\.\d+$/.test(hv)) state.seen[me] = hv;
+    if (state.askLatest && !state.legacy) res.setHeader('X-Ask-Latest', state.askLatest);
+
+    if (m === 'GET' && p === '/v1/ask-version') {
+      if (state.legacy) return error(res, 404, 'not_found', `${m} ${p}`);
+      return send(res, 200, { latest: state.askLatest, update_command: state.updateCommand, released_at: state.releasedAt, notice: state.noticeLink });
+    }
+    if (p === '/v1/announce' && !state.legacy) return announceRoute(req, res, m, me);
 
     if (m === 'GET' && p === '/v1/whoami') return send(res, 200, { teammate: me, via: 'dev' });
 

@@ -6,6 +6,7 @@ import { resolveHubUrl, ConfigError } from '../config.js';
 import { createClient, HubError, HubUnreachable } from '../client.js';
 import { ASSISTANTS } from './assistants/index.js';
 import { serverSpec } from './assistants/common.js';
+import { formatAskUpdate } from '../update.js';
 
 /**
  * Assistants that currently have the ask MCP server registered.
@@ -24,7 +25,7 @@ export function registeredAssistants(sys) {
 
 /**
  * @param {import('./sys.js').Sys} sys
- * @param {{ hubUrl?: string, timeoutSec?: number }} [o]
+ * @param {{ hubUrl?: string, timeoutSec?: number, reportUpdates?: boolean }} [o]
  * @returns {Promise<number>} exit code
  */
 export async function runStandby(sys, o = {}) {
@@ -38,7 +39,10 @@ export async function runStandby(sys, o = {}) {
     }
     throw e;
   }
-  const client = createClient({ hubUrl, via: 'cli', log: (m) => sys.err(`ask standby: ${m}`), tools: registeredAssistants(sys) });
+  const client = createClient({
+    hubUrl, via: 'cli', log: (m) => sys.err(`ask standby: ${m}`), tools: registeredAssistants(sys),
+    updateState: sys, onAskUpdate: o.reportUpdates === false ? undefined : (update) => sys.err(formatAskUpdate(update)),
+  });
   try {
     const me = await client.whoami();
     const created = await client.create({ client_request_id: randomUUID(), kind: 'standby_test' });
@@ -74,5 +78,7 @@ export async function runStandby(sys, o = {}) {
       return 4;
     }
     throw e;
+  } finally {
+    if (o.reportUpdates !== false) await client.askUpdate();
   }
 }

@@ -11,7 +11,7 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { HubError, HubUnreachable, VERSION, createClient, submitQuestion, sendReceipt, formatAnswer } from '../client.js';
+import { HubError, HubUnreachable, VERSION, createClient, submitQuestion, sendReceipt, formatAnswer, versionHeaders } from '../client.js';
 import { PendingStore, pendingFilePath } from '../pending.js';
 import { locateTailscale, tailscaleEnv, tailscaleStatus } from './tailscale.js';
 import { checkGh } from './checks.js';
@@ -74,7 +74,7 @@ export function onboardingClient(hubUrl, token) {
     try {
       const res = await fetch(`${base}/v1/onboarding/${route}`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json; charset=utf-8' },
+        headers: { ...versionHeaders('cli'), 'content-type': 'application/json; charset=utf-8' },
         body: JSON.stringify({ ...body, token }),
         signal: ctrl.signal,
       });

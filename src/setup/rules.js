@@ -14,13 +14,14 @@
 //   CLAUDE.md is edited.
 import { pathFor } from '../config.js';
 import { KNOWLEDGE_RULES_TEXT } from '../knowledge.js';
+import { UPDATE_RULE } from '../update.js';
 import { writeTextWithBackup } from './assistants/common.js';
 
 export const BLOCK_START = '<!-- ask:knowledge -->';
 export const BLOCK_END = '<!-- /ask:knowledge -->';
 
 /** The whole marked block. */
-export const RULES_BLOCK = `${BLOCK_START}\n## Search the team playbook before asking a human\n\n${KNOWLEDGE_RULES_TEXT}\n${BLOCK_END}`;
+export const RULES_BLOCK = `${BLOCK_START}\n## Search the team playbook before asking a human\n\n${KNOWLEDGE_RULES_TEXT}\n\n## When ask reports an update\n\n${UPDATE_RULE}\n${BLOCK_END}`;
 
 /**
  * The rules file for an assistant, or null when it has none ask can write.

@@ -1,13 +1,13 @@
 // @ts-check
 // `ask doctor`: read-only checks, one line each; non-zero if any fail.
 import { resolveHubUrl, configFilePath } from '../config.js';
-import { VERSION } from '../client.js';
+import { createClient, VERSION } from '../client.js';
 import { locateTailscale, tailscaleStatus } from './tailscale.js';
 import { checkHealth, checkWhoami, checkGh } from './checks.js';
 import { ASSISTANTS } from './assistants/index.js';
 import { serverSpec } from './assistants/common.js';
 import { starterNodeWarning } from './nodeversion.js';
-import { createClient } from '../client.js';
+import { formatAskUpdate } from '../update.js';
 import { fetchSources, readManifest, syncSources, knowledgeStatus, ageText } from '../knowledge.js';
 
 /**
@@ -50,6 +50,7 @@ export async function runDoctor(sys, o = {}) {
   } catch (e) {
     line(false, 'config', `${/** @type {Error} */ (e).message}`);
   }
+  const client = hubUrl ? createClient({ hubUrl, via: 'cli', retryDelaysMs: [500], updateState: sys }) : null;
 
   const bin = locateTailscale(sys);
   if (!bin) line(false, 'Tailscale', 'not installed');
@@ -58,10 +59,10 @@ export async function runDoctor(sys, o = {}) {
     line(ts.state === 'running', 'Tailscale', ts.state === 'running' ? `signed in as ${ts.login ?? '(unknown login)'}` : `not connected (${ts.detail})`);
   }
 
-  if (hubUrl) {
+  if (hubUrl && client) {
     const h = await checkHealth(sys, hubUrl);
     line(h.ok, 'hub health', h.ok ? `${hubUrl} ok (hub ${h.health.version}, chat ${h.health.chat}${h.health.chat_connected ? ' connected' : ' NOT connected'})` : h.message);
-    const w = await checkWhoami(hubUrl);
+    const w = await checkWhoami(hubUrl, client);
     line(w.ok, 'whoami', w.ok ? w.teammate : `${w.code}: ${w.message}`);
   } else {
     line(false, 'hub health', 'no hub address');
@@ -89,8 +90,8 @@ export async function runDoctor(sys, o = {}) {
   // it never changes the exit code (no access yet, no gh, a failed pull).
   try {
     let sources = readManifest(sys);
-    if (hubUrl) {
-      const r = await fetchSources(createClient({ hubUrl, via: 'cli', retryDelaysMs: [] }));
+    if (client) {
+      const r = await fetchSources(client);
       if (r.ok) sources = r.sources;
     }
     if (sources.length) {
@@ -110,7 +111,9 @@ export async function runDoctor(sys, o = {}) {
 
   if (!anyAssistant) note('note  assistants: none detected (use the ask CLI; see `ask setup` for an AGENTS.md snippet)');
 
-  if (o.json) sys.out(JSON.stringify({ ok: failed === 0, checks }));
+  const update = await client?.askUpdate();
+  if (update) warn('ask update', formatAskUpdate(update).replaceAll('\n', ' '));
+  if (o.json) sys.out(JSON.stringify({ ok: failed === 0, checks, ...(update ? { ask_update: update } : {}) }));
   else sys.out(failed ? `${failed} check(s) failed.` : 'All checks passed.');
   return failed ? 1 : 0;
 }
