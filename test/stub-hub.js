@@ -21,6 +21,7 @@ const TERMINAL_WAKE = new Set(['answered', 'delivered', 'failed']);
  *   askLatest?: string|null,           // contract changes 9, 10: the announced version (X-Ask-Latest on authenticated responses, GET /v1/ask-version); legacy hub: none
  *   updateCommand?: string|null, noticeLink?: string|null,
  *   announcer?: string,                // contract change 11: who may POST/GET /v1/announce (default 'jose')
+ *   attention?: object,                // contract change 13: the body of GET /v1/announce/attention (default: nothing waiting)
  *   teammates?: string[],              // known teammates for announce audiences (default jose, nora, grish)
  *   channelAll?: boolean,              // `channels.all` configured (default true)
  *   noTicks?: boolean,                 // health: notice_ticks "off"
@@ -82,6 +83,11 @@ export async function startStubHub(opts = {}) {
     /** @type {Map<string, any>} client_request_id → notice */
     noticeIdem: new Map(),
     announceCalls: 0,
+    summaries: new Map(), // contract change 13: client_request_id → stored summary
+    summaryDays: new Map(), // day → summary
+    summaryPending: false, // true → store it but answer status "pending" (Slack not confirmed)
+    chatDown: false, // true → 503 chat_unavailable for a summary
+    attention: opts.attention ?? { questions_waiting: { count: 0, items: [] }, unconfirmed_notices: { count: 0, items: [] } },
     /** fault injection */
     dropNextCreateResponses: 0, // process the create (new or repeated), then destroy the socket
     failReceipts: 0, // next N receipts → socket destroyed
@@ -356,6 +362,27 @@ export async function startStubHub(opts = {}) {
   const semverGt = (a, b) => a.split('.').map(Number).reduce((r, n, i) => r || n - Number(b.split('.')[i]), 0) > 0;
   const semverGe = (a, b) => a === b || semverGt(a, b);
 
+  /** Contract change 13: same codes as the hub; the day is taken as is (the stub has no clock rule). */
+  function summaryRoute(res, b, me, bad) {
+    if (typeof b.client_request_id !== 'string' || !b.client_request_id) return bad('client_request_id is required');
+    if (!Array.isArray(b.dm) || b.dm.length !== 1 || b.dm[0] !== me) return bad('dm must be exactly [the announcer]', 'invalid_dm');
+    const invalid = (msg) => bad(msg, 'invalid_summary');
+    if (typeof b.day !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(b.day)) return invalid('day must be YYYY-MM-DD');
+    if (!Array.isArray(b.lines) || b.lines.length < 1 || b.lines.length > 5) return invalid('lines must be 1–5 strings');
+    for (const l of b.lines) {
+      if (typeof l !== 'string' || !l.trim() || l.includes('\n') || l.length > 200) return invalid('each line must be one non-empty line of at most 200 characters');
+      if (SECRET.test(l)) return invalid('a line looks like it contains a secret');
+    }
+    const repeat = state.summaries.get(b.client_request_id);
+    if (repeat) return send(res, 200, { id: repeat.id, day: repeat.day, status: repeat.status });
+    if (state.summaryDays.has(b.day)) return error(res, 409, 'already_sent_today', 'A summary was already sent for that day.');
+    if (state.chatDown) return error(res, 503, 'chat_unavailable', 'Slack is not connected.');
+    const summary = { id: `sm_${randomUUID().replace(/-/g, '').slice(0, 12)}`, day: b.day, to: b.dm[0], lines: b.lines, status: state.summaryPending ? 'pending' : 'sent' };
+    state.summaries.set(b.client_request_id, summary);
+    state.summaryDays.set(b.day, summary);
+    return send(res, 201, { id: summary.id, day: summary.day, status: summary.status });
+  }
+
   /** @param {http.IncomingMessage} req @param {http.ServerResponse} res @param {string} m @param {string} me */
   async function announceRoute(req, res, m, me) {
     if (me !== state.announcer) return error(res, 403, 'not_announcer', 'Only the announcer may post or list update notices.');
@@ -377,6 +404,7 @@ export async function startStubHub(opts = {}) {
     const b = await readBody(req);
     state.announceCalls += 1;
     const bad = (msg, code = 'invalid_request') => error(res, 400, code, msg);
+    if (b && b.kind === 'summary') return summaryRoute(res, b, me, bad);
     if (!b || typeof b !== 'object' || typeof b.client_request_id !== 'string' || !b.client_request_id) return bad('client_request_id is required');
     if (state.noticeIdem.has(b.client_request_id)) {
       const n = state.noticeIdem.get(b.client_request_id);
@@ -448,6 +476,10 @@ export async function startStubHub(opts = {}) {
       return send(res, 200, { latest: state.askLatest, update_command: state.updateCommand, released_at: state.releasedAt, notice: state.noticeLink });
     }
     if (p === '/v1/announce' && !state.legacy) return announceRoute(req, res, m, me);
+    if (p === '/v1/announce/attention' && !state.legacy) {
+      if (me !== state.announcer) return error(res, 403, 'not_announcer', 'Only the announcer may read this.');
+      return m === 'GET' ? send(res, 200, { generated_at: new Date().toISOString(), ...state.attention }) : error(res, 404, 'not_found', `${m} ${p}`);
+    }
 
     if (m === 'GET' && p === '/v1/whoami') return send(res, 200, { teammate: me, via: 'dev' });
 

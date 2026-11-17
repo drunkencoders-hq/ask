@@ -5,6 +5,18 @@ One entry per release, newest first. The version lives in one place, `package.js
 newest entry and `package.json` disagree. Semver: a patch for fixes, a minor for
 anything a teammate will see, a major for something that breaks.
 
+## 0.4.0 - 2026-11-17
+
+For the announcer only (nothing changes for mentees; no update notice):
+
+- **Evening summary DM.** `ask announce --summary --file lines.txt [--day YYYY-MM-DD]
+  [--dry-run] [--json]` sends up to five short lines to the announcer as one Slack DM
+  from the hub, once a day. `--dry-run` prints the DM text without calling the hub.
+  A repeat the same day prints `already sent today`.
+- **What is waiting.** `ask announce --attention [--json]` prints the questions and
+  unconfirmed update notices the hub knows are waiting on the announcer, or
+  `nothing waiting`.
+
 ## 0.3.0 - 2026-11-16
 
 What you will see:

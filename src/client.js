@@ -176,6 +176,9 @@ export function createClient(opts) {
     knowledge: () => withRetries(() => request('GET', '/v1/knowledge'), 'knowledge').then((r) => r.data),
     /** @param {Record<string, unknown>} body */
     announce: (body) => withRetries(() => request('POST', '/v1/announce', body), 'posting notice').then((r) => r.data),
+    /** Evening summary (contract change 13): the whole response, so a repeat (200) can be told from a first send (201). @param {Record<string, unknown>} body */
+    announceSummary: (body) => withRetries(() => request('POST', '/v1/announce', body), 'sending summary'),
+    attention: () => withRetries(() => request('GET', '/v1/announce/attention'), 'reading attention').then((r) => r.data),
     listNotices: () => withRetries(() => request('GET', '/v1/announce'), 'listing notices').then((r) => r.data),
 
     /**

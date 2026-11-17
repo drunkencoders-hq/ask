@@ -518,6 +518,24 @@ the same command with the same file and flags to resume without duplicate
 posts. `--list` shows notices and which recipients are current, behind or
 unknown. Use `--json` for the hub's structured results.
 
+### Evening summary
+
+The announcer can send themselves a short DM from the hub, at most once a day.
+Put one line per fact (1–5 non-blank lines, up to 200 characters each, no
+secrets) in a file:
+
+```sh
+ask announce --summary --file summary.txt --dry-run   # prints the DM text, calls nothing
+ask announce --summary --file summary.txt             # prints "sent: <id>" or "already sent today"
+ask announce --attention                              # what is waiting on you, or "nothing waiting"
+```
+
+`--day YYYY-MM-DD` defaults to today's local date. A retry the same day reuses
+the same request id, so nothing is sent twice. A hub or Slack problem exits
+non-zero with the reason (safe to retry). `--summary` cannot be combined with
+`--to`, `--ask-version`, `--update-command` or `--mention`. `--attention --json`
+prints the hub's body unchanged.
+
 ## Development
 
 ```

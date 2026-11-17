@@ -56,6 +56,8 @@ Usage:
   ask checkout-check --consent --repo <org>/sandbox [--projects-root <path>] [--checkout <path>]
   ask standby                       send a standby test through the hub
   ask announce --to name --file note.md [--dry-run] | --list | --template
+  ask announce --summary --file lines.txt [--day YYYY-MM-DD] [--dry-run] [--json]   evening summary DM (announcer only)
+  ask announce --attention [--json]                                                what is waiting on the announcer
 
 Exit codes: 0 answered and receipt recorded · 2 configuration or usage error ·
 3 still pending at --timeout · 4 hub unreachable · 5 refused ·
@@ -286,8 +288,7 @@ export async function main(argv) {
   if (sub === 'checkout-check') return runCheckoutCheck(argv.slice(1));
   if (sub === 'announce') {
     try {
-      await runAnnounce(argv.slice(1));
-      return EXIT.OK;
+      return (await runAnnounce(argv.slice(1))) ?? EXIT.OK;
     } catch (e) {
       return fail(e);
     }

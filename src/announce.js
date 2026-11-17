@@ -1,9 +1,11 @@
 // @ts-check
 import fs from 'node:fs';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { parseArgs } from 'node:util';
+import path from 'node:path';
 import { resolveHubUrl } from './config.js';
-import { createClient } from './client.js';
+import { pendingFilePath } from './pending.js';
+import { createClient, HubError } from './client.js';
 import { formatAskUpdate, normaliseVersion } from './update.js';
 
 const SECTIONS = /** @type {const} */ ([
@@ -59,7 +61,130 @@ function parseNotice(markdown) {
   return { title, .../** @type {Record<Section, string>} */ (Object.fromEntries(fields)) };
 }
 
-/** @param {string[]} args */
+const SUMMARY_LINES = 5;
+const SUMMARY_LINE_MAX = 200;
+const NOT_WITH_SUMMARY = ['to', 'ask-version', 'update-command', 'mention', 'list', 'template'];
+
+/** The machine's local date as YYYY-MM-DD. @param {Date} [now] */
+function localDay(now = new Date()) {
+  const pad = (/** @type {number} */ n) => String(n).padStart(2, '0');
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/** @param {string} text */
+function parseSummary(text) {
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 1 || lines.length > SUMMARY_LINES) throw new NoticeError(`the summary file needs 1–${SUMMARY_LINES} non-blank lines (it has ${lines.length})`);
+  const long = lines.findIndex((l) => l.length > SUMMARY_LINE_MAX);
+  if (long >= 0) throw new NoticeError(`summary line ${long + 1} is longer than ${SUMMARY_LINE_MAX} characters`);
+  if (lines.some((l) => SECRET.test(l))) throw new NoticeError('the summary looks like it contains a secret or a credentialed or clone URL');
+  return lines;
+}
+
+/** The DM text the hub sends (contract change 13): a bold header, then the lines as bullets. @param {string} day @param {string[]} lines */
+export function summaryText(day, lines) {
+  return [`*drunkbot evening summary, ${day}*`, ...lines.map((l) => `• ${l}`)].join('\n');
+}
+
+/**
+ * One client_request_id per hub and day, kept in ask's state directory so a retry the same day
+ * reuses it (the hub then answers a repeat instead of sending twice).
+ * @param {string} hubUrl @param {string} day
+ */
+function summaryRequestId(hubUrl, day) {
+  const key = createHash('sha256').update(hubUrl).digest('hex').slice(0, 24);
+  const file = path.join(path.dirname(pendingFilePath()), `summary-${key}.json`);
+  try {
+    const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (saved?.day === day && typeof saved.client_request_id === 'string') return saved.client_request_id;
+  } catch {
+    // none yet, or unreadable: make a new one
+  }
+  const id = randomUUID();
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify({ day, client_request_id: id }));
+  } catch {
+    // not fatal: without the file a retry gets a new id and the hub answers 409 already_sent_today
+  }
+  return id;
+}
+
+/**
+ * @param {{summary?: boolean, attention?: boolean, file?: string, day?: string, json?: boolean, 'dry-run'?: boolean}} values
+ * @param {(line: string) => void} print @param {(data: unknown) => void} printJson
+ * @param {() => ReturnType<typeof createClient>} connect
+ * @returns {Promise<number|undefined>} a non-zero exit code when the goal was not met
+ */
+async function runSummaryOrAttention(values, print, printJson, connect) {
+  const given = /** @type {Record<string, unknown>} */ (values);
+  if (values.summary && values.attention) throw new NoticeError('--summary and --attention cannot be combined');
+  if (NOT_WITH_SUMMARY.some((key) => key in given)) {
+    throw new NoticeError(`--${values.summary ? 'summary' : 'attention'} cannot be combined with --to, --ask-version, --update-command, --mention, --list or --template`);
+  }
+  if (values.attention) {
+    if (['file', 'day', 'dry-run'].some((key) => key in given)) throw new NoticeError('--attention takes only --json');
+    const client = connect();
+    const a = await client.attention();
+    if (values.json) {
+      printJson(a);
+      return;
+    }
+    const facts = [];
+    const q = a.questions_waiting;
+    if (q?.count > 0) {
+      const oldest = Math.max(...q.items.map((/** @type {any} */ i) => i.age_minutes));
+      const age = oldest >= 60 ? `${Math.floor(oldest / 60)}h` : `${oldest}m`;
+      facts.push(`${q.count} question${q.count === 1 ? '' : 's'} waiting (oldest ${age})`);
+    }
+    const n = a.unconfirmed_notices;
+    if (n?.count > 0) {
+      for (const item of n.items) facts.push(`1 notice not confirmed after 24h: ${item.title} (${(item.behind ?? item.to).join(', ')})`);
+      if (n.count > n.items.length) facts.push(`${n.count - n.items.length} more notices not confirmed after 24h`);
+    }
+    print(facts.length ? facts.join('\n') : 'nothing waiting');
+    return;
+  }
+
+  if (!values.file) throw new NoticeError('give --file with the summary lines');
+  if (values.day !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(values.day)) throw new NoticeError('--day must be YYYY-MM-DD');
+  const day = values.day ?? localDay();
+  let text;
+  try {
+    text = fs.readFileSync(values.file, 'utf8');
+  } catch (e) {
+    throw new NoticeError(`cannot read --file: ${/** @type {Error} */ (e).message}`);
+  }
+  const lines = parseSummary(text);
+  if (values['dry-run']) {
+    if (values.json) printJson({ kind: 'summary', day, lines });
+    else print(summaryText(day, lines));
+    return;
+  }
+
+  const client = connect();
+  const { teammate } = await client.whoami();
+  const body = { kind: 'summary', client_request_id: summaryRequestId(client.hubUrl, day), day, dm: [teammate], lines };
+  let response;
+  try {
+    response = await client.announceSummary(body);
+  } catch (e) {
+    if (e instanceof HubError && e.code === 'already_sent_today') {
+      if (values.json) printJson({ status: 'already_sent_today', day });
+      else print('already sent today');
+      return;
+    }
+    throw e;
+  }
+  const { status, data } = response;
+  if (values.json) printJson(data);
+  else if (status === 200) print('already sent today');
+  else if (data.status === 'sent') print(`sent: ${data.id}`);
+  else print(`pending: ${data.id} (the hub stored it but Slack has not confirmed; run the same command again)`);
+  if (data.status === 'pending') return 4;
+}
+
+/** @param {string[]} args @returns {Promise<number|undefined>} */
 export async function runAnnounce(args) {
   let values;
   try {
@@ -75,6 +200,9 @@ export async function runAnnounce(args) {
         json: { type: 'boolean' },
         list: { type: 'boolean' },
         template: { type: 'boolean' },
+        summary: { type: 'boolean' },
+        attention: { type: 'boolean' },
+        day: { type: 'string' },
       },
     }));
   } catch (e) {
@@ -89,6 +217,14 @@ export async function runAnnounce(args) {
   if ((values.list || values.template) && postFlags.some((key) => key in values)) {
     throw new NoticeError('--list and --template cannot be combined with notice posting flags');
   }
+  if (values.summary || values.attention) {
+    return runSummaryOrAttention(values, print, printJson, () => createClient({
+      hubUrl: resolveHubUrl().hubUrl,
+      via: 'cli',
+      onAskUpdate: (update) => process.stderr.write(`${formatAskUpdate(update)}\n`),
+    }));
+  }
+  if ('day' in values) throw new NoticeError('--day is only for --summary');
   if (values.template) {
     if (values.list || values.json) throw new NoticeError('--template takes no other flags');
     print(['# Notice title', ...SECTIONS.map(([label]) => `## ${label}`)].join('\n\n'));
