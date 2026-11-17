@@ -5,6 +5,15 @@ One entry per release, newest first. The version lives in one place, `package.js
 newest entry and `package.json` disagree. Semver: a patch for fixes, a minor for
 anything a teammate will see, a major for something that breaks.
 
+## 0.3.0 - 2026-11-16
+
+What you will see:
+
+- **Check your local sandbox.** `ask checkout-check --consent --repo <org>/sandbox`
+  and the `ask_checkout_check` MCP tool verify the Git checkout after you agree
+  to the check. The result reports whether the checkout is in place, elsewhere,
+  missing from the checked locations, or unknown. Paths and remote URLs stay local.
+
 ## 0.2.0 - 2026-11-16
 
 What you will see:
