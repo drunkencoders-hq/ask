@@ -260,6 +260,8 @@ export function createClient(opts) {
 
     /** Notices queued for me (contract change 15); an older hub answers 404. */
     notices: () => withRetries(() => request('GET', '/v1/notices/mine'), 'reading notices').then((r) => r.data),
+    /** My learning path (contract change 17); 404 not_configured, or an older hub, throws a 404 HubError. */
+    learningPath: () => withRetries(() => request('GET', '/v1/learning-path'), 'reading learning path').then((r) => r.data),
     /** The receipt for a notice shown to me. Idempotent. @param {string} id */
     markNoticeSeen: (id) =>
       withRetries(() => request('POST', `/v1/notices/${encodeURIComponent(id)}/seen`), 'marking notice seen').then((r) => r.data),

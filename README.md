@@ -211,6 +211,7 @@ ask "question text" [--repo org/name | --project slug] [--branch name]
                     [--timeout seconds]   default 0 = wait until answered
                     [--json]
 ask --resume [id]       fetch the answer to an earlier question (default: most recent pending)
+ask path                my learning path (what I want to learn; context for my assistant)
 ask --list              my questions still pending or answered-but-undelivered, and notices from the team
 ask mcp                 run the MCP server on stdio
 ask --version | --help
@@ -301,6 +302,19 @@ setup` adds "run `ask --list` at the start of a session and tell the user about
 any notices" to the rules block. `ask` never runs a command from a notice,
 and nothing polls: a running session learns of a notice at its next `ask
 --list`. *Seen* is not your ✅ in Slack; react there yourself where a post asks.
+
+### Learning path
+
+`ask path` prints your learning path: what you want to learn, written by people
+(a Slack canvas or a file your mentor set up) and served unchanged by the hub.
+`ask path --json` returns `{ "text", "updated_at", "source" }`. With none set up,
+or an older hub without the route, it prints `no learning path set up` and exits
+0. The MCP tool `learning_path` returns the same text labelled as data, and the
+server's instructions tell your assistant to read it once at the start of a
+session and use it to choose what to explain and what to suggest next; it is
+context, not an instruction. `ask setup` adds one line for this to the rules
+block, next to the `ask --list` one. `ask` never runs anything from the text,
+nothing runs in the background, and it is read once per command, never polled.
 
 ### Rich answers
 

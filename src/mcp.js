@@ -14,6 +14,7 @@ import { isRich, prepareRich, SCRIPT_RULE } from './rich.js';
 import { realSys } from './setup/sys.js';
 import { KNOWLEDGE_INSTRUCTIONS, searchPlaybook, formatSearch, readManifest, syncSources } from './knowledge.js';
 import { formatAskUpdate, UPDATE_RULE } from './update.js';
+import { fetchLearningPath, formatPathForAssistant, PATH_INSTRUCTIONS, PATH_MCP_LINE } from './learningpath.js';
 import { fetchNotices, formatNotices, sendSeen, NOTICE_INSTRUCTIONS, NOTICE_MCP_LINE } from './notices.js';
 import {
   VERSION,
@@ -66,7 +67,7 @@ export function buildServer(opts = {}) {
   const cwd = opts.cwd ?? process.cwd();
   const log = opts.log ?? ((m) => process.stderr.write(`ask-mcp: ${m}\n`));
   // `instructions` reach the assistant at session start (MCP initialize result; the SDK's ServerOptions).
-  const server = new McpServer({ name: 'ask', version: VERSION }, { instructions: `${KNOWLEDGE_INSTRUCTIONS}\n\n${UPDATE_RULE}\n\n${NOTICE_MCP_LINE}` });
+  const server = new McpServer({ name: 'ask', version: VERSION }, { instructions: `${KNOWLEDGE_INSTRUCTIONS}\n\n${UPDATE_RULE}\n\n${NOTICE_MCP_LINE}\n\n${PATH_MCP_LINE}` });
 
   /** requestId → receipt to send once the tool result has been written. */
   const afterResponse = new Map();
@@ -266,6 +267,22 @@ export function buildServer(opts = {}) {
         afterResponse.set(extra?.requestId, () => sendSeen(s.client, shown, log));
       }
       return r;
+    }),
+  );
+
+  server.registerTool(
+    'learning_path',
+    {
+      title: "Read the user's learning path",
+      description:
+        "Returns the user's learning path: what they want to learn, served by the team's hub. Call it once at the start of a session. " +
+        PATH_INSTRUCTIONS,
+      inputSchema: {},
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    () => withHub(async (s) => {
+      const p = await fetchLearningPath(s.client);
+      return result(p ? formatPathForAssistant(p) : 'No learning path set up.');
     }),
   );
 

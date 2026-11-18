@@ -13,6 +13,7 @@ import { isRich, prepareRich } from './rich.js';
 import { NoticeError, runAnnounce } from './announce.js';
 import { formatAskUpdate } from './update.js';
 import { fetchNotices, formatNotices, sendSeen } from './notices.js';
+import { fetchLearningPath, NO_PATH_LINE } from './learningpath.js';
 import path from 'node:path';
 import {
   VERSION,
@@ -46,6 +47,7 @@ Usage:
                       [--json] [--no-save]
   ask --resume [id] [--no-save]   fetch the answer to an earlier question (default: most recent pending)
   ask --list          my questions still pending or answered-but-undelivered, and notices from the team
+  ask path [--json]   my learning path from the hub (what I want to learn; context for my assistant)
   ask mcp             run the MCP server on stdio
   ask --version | --help
   ask setup --hub <url>             configure, sign in, register MCP, verify
@@ -280,12 +282,33 @@ async function runCheckoutCheck(args) {
   return result.status === 'consent_required' ? EXIT.REFUSED : EXIT.OK;
 }
 
+/** `ask path [--json]`: print the learning path the hub serves for me. @param {string[]} args */
+async function runPath(args) {
+  try {
+    if (args.some((a) => a !== '--json')) throw new UsageError('usage: ask path [--json]');
+    const json = args.includes('--json');
+    const { hubUrl } = resolveHubUrl();
+    const client = createClient({ hubUrl, via: 'cli', log: (m) => err(`ask: ${m}`), onAskUpdate: (update) => err(formatAskUpdate(update)) });
+    const p = await fetchLearningPath(client);
+    if (!p) {
+      process.stdout.write(NO_PATH_LINE + '\n');
+      return EXIT.OK;
+    }
+    if (json) await printJson(client, { text: p.text, updated_at: p.updated_at, source: p.source }, 2);
+    else process.stdout.write(p.text.endsWith('\n') ? p.text : p.text + '\n');
+    return EXIT.OK;
+  } catch (e) {
+    return fail(e);
+  }
+}
+
 /**
  * @param {string[]} argv
  * @returns {Promise<number>}
  */
 export async function main(argv) {
   const sub = argv[0];
+  if (sub === 'path') return runPath(argv.slice(1));
   if (sub === 'checkout-check') return runCheckoutCheck(argv.slice(1));
   if (sub === 'announce') {
     try {

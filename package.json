@@ -1,6 +1,6 @@
 {
   "name": "drunkencoders-ask",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Ask the project's owner a question through the drunkencoders hub. One implementation, exposed as a CLI and an MCP server.",
   "type": "module",
   "bin": {
@@ -18,7 +18,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/paths.test.js test/cli.test.js test/mcp.test.js test/checkout.test.js test/mentor.test.js test/assistants.test.js test/setup.test.js test/onboarding.test.js test/nodeversion.test.js test/rich.test.js test/knowledge.test.js test/version.test.js test/update.test.js test/summary.test.js test/notices.test.js test/bootstrap-sh.test.js",
+    "test": "node --test --test-concurrency=1 test/paths.test.js test/cli.test.js test/mcp.test.js test/checkout.test.js test/mentor.test.js test/assistants.test.js test/setup.test.js test/onboarding.test.js test/nodeversion.test.js test/rich.test.js test/knowledge.test.js test/version.test.js test/update.test.js test/summary.test.js test/notices.test.js test/learningpath.test.js test/bootstrap-sh.test.js",
     "demo": "node scripts/demo.js",
     "demo:mcp": "node scripts/demo-mcp.js",
     "demo:mentor": "node scripts/demo-mentor.js",

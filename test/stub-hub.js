@@ -86,6 +86,8 @@ export async function startStubHub(opts = {}) {
     /** Contract change 15: per-teammate notice queue rows ({ notice, state }); GET /v1/notices/mine, POST /v1/notices/{id}/seen. */
     /** @type {Map<string, { notice: any, state: 'queued'|'seen', seen_at?: string }[]>} */
     queue: new Map(),
+    /** Contract change 17: this caller's learning path, or null (404 not_configured). */
+    learningPath: /** @type {null|{text:string, updated_at:string, source:string}} */ (opts.learningPath ?? null),
     seenFail: 0,          // next N seen calls answer 503
     summaries: new Map(), // contract change 13: client_request_id → stored summary
     summaryDays: new Map(), // day → summary
@@ -490,6 +492,12 @@ export async function startStubHub(opts = {}) {
       if (state.legacy) return error(res, 404, 'not_found', `${m} ${p}`);
       const rows = (state.queue.get(me) ?? []).filter((r) => r.state === 'queued');
       return send(res, 200, { notices: rows.slice(0, 20).map((r) => r.notice), ...(rows.length > 20 ? { more: rows.length - 20 } : {}) });
+    }
+    if (p === '/v1/learning-path') {
+      if (state.legacy) return error(res, 404, 'not_found', `${m} ${p}`);
+      if (m !== 'GET') return error(res, 405, 'method_not_allowed', m);
+      if (!state.learningPath) return error(res, 404, 'not_configured', 'no learning path for you');
+      return send(res, 200, state.learningPath);
     }
     const seenMatch = /^\/v1\/notices\/([^/]+)\/seen$/.exec(p);
     if (seenMatch && m === 'POST') {

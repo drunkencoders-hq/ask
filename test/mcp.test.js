@@ -29,7 +29,7 @@ test('MCP tools/list shows ask, ask_checkout_check, ask_list, ask_resume and pla
   const client = await connect(t);
   try {
     const { tools } = await client.listTools();
-    assert.deepEqual(tools.map((x) => x.name).sort(), ['ask', 'ask_checkout_check', 'ask_list', 'ask_resume', 'playbook_search']);
+    assert.deepEqual(tools.map((x) => x.name).sort(), ['ask', 'ask_checkout_check', 'ask_list', 'ask_resume', 'learning_path', 'playbook_search']);
     const ask = tools.find((x) => x.name === 'ask');
     assert.match(ask?.description ?? '', /owner/);
     assert.deepEqual(Object.keys(ask?.inputSchema.properties ?? {}).sort(), ['branch', 'context', 'project', 'question', 'repo', 'wait_seconds']);

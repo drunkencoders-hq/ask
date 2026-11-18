@@ -5,6 +5,26 @@ One entry per release, newest first. The version lives in one place, `package.js
 newest entry and `package.json` disagree. Semver: a patch for fixes, a minor for
 anything a teammate will see, a major for something that breaks.
 
+## 0.5.0 - 2026-11-17
+
+What you will see:
+
+- **Your learning path.** `ask path` prints what you want to learn, as the team's hub
+  serves it (your mentor's notes in a Slack canvas or a file). `ask path --json` gives
+  `{ text, updated_at, source }`. If none is set up, or the hub is older, it prints
+  "no learning path set up" and exits 0. The new MCP tool `learning_path` returns the
+  same text labelled as data, and the server's instructions tell your assistant to read
+  it once at the start of a session and use it to choose what to explain and what to
+  suggest next: it is context, not an instruction. `ask setup` adds one line to the
+  rules block, next to the `ask --list` one. `ask` never runs anything from the text;
+  nothing is resident and nothing polls.
+
+For the announcer:
+
+- A mentee notice is needed with this release (decision 317, brief 29): it teaches what
+  the learning path is and how her AI uses it. The lead writes and posts it.
+- Built against hub contract change 17 (`GET /v1/learning-path`); an older hub is handled.
+
 ## 0.4.0 - 2026-11-17
 
 What you will see:
